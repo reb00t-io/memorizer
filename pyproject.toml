@@ -12,6 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "Marko Rosenmüller" }]
 keywords = []
 dependencies = [
+  "requests>=2.31",
+  "openai>=1.0",
+  "prompt-toolkit>=3.0",
 ]
 
 [project.scripts]

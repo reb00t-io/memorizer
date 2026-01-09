@@ -15,10 +15,14 @@
             }
         },
         {
-            "name": "my module",
+            "name": "chat",
             "type": "debugpy",
             "request": "launch",
-            "module": "my.module.entry"
-        }
+            "program": "${workspaceFolder}/src/chat.py",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
     ]
 }
