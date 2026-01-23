@@ -53,6 +53,22 @@ class Memory:
         self._apply(messages)
         self._save_to_disk()
 
+    def set_var(self, var: str, value: str) -> None:
+        token = f"<{var}>"
+        updated: list[Message] = []
+        changed = False
+        for message in self._messages:
+            content = message.content.replace(token, str(value))
+            if content != message.content:
+                changed = True
+                updated.append(Message(role=message.role, content=content))
+            else:
+                updated.append(message)
+
+        if changed:
+            self._messages = updated
+            self._save_to_disk()
+
     def _apply(self, messages: Iterable[dict[str, str] | Message]) -> None:
         for message in messages:
             if isinstance(message, Message):
@@ -74,8 +90,6 @@ class Memory:
                     self._messages = self._messages[-(self._max_messages - 1) :] + [message]
             else:
                 self._messages.append(message)
-
-
     def to_messages(self) -> list[dict[str, str]]:
         return [{"role": m.role, "content": m.content} for m in self._messages]
 

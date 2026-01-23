@@ -6,6 +6,12 @@ import asyncio
 from src.context import Context
 
 
+MODEL_INFO = {
+    "model_name": "gpt-oss",
+    "model_id": "gpt-oss-120b",
+}
+
+
 async def stream_completion(context: Context, max_completion_tokens: int = 1500):
     """
     Stream LLM completion using a local OpenAI-compatible endpoint.
@@ -23,7 +29,7 @@ async def stream_completion(context: Context, max_completion_tokens: int = 1500)
 
     try:
         base_url = "http://[::1]:8080/v1"
-        model = "gpt-oss-120b"
+        model = MODEL_INFO["model_id"]
 
         # Prepare API request
         url = f"{base_url}/chat/completions"
