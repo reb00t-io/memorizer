@@ -2,14 +2,7 @@
 
 ## Core Idea
 
-Use a **model‑managed context** with explicit memory sections, lightweight metadata, and background compression to keep long‑running conversations compact while preserving fidelity at the tail.
-
-- **Context is structured** into fixed sections (system, long‑term, short‑term, recall, working) so the model can reliably “know where to look.”
-- **Messages carry timestamps**, and the latest message is prefixed with the current time to anchor recency.
-- **Assistant outputs are compressed asynchronously** into a stored `compressed_content` field.
-- **Only the tail stays uncompressed** (configurable), while older working messages can be served from their compressed form.
-
-This keeps **behavior in weights** while **facts and evolving state** live in memory — with a stable protocol for retrieval and summarization.
+Use a **model‑managed context** and **structured memory** to separate behavior (in weights) from knowledge, goals, and evolving state (in memory). The system keeps conversations concise through continuous consolidation while preserving recent context and a consistent, learnable layout. A key property is **in‑context learning paired with higher‑level reasoning**: fine‑tuning keeps knowledge in context to improve retrieval, while training teaches the model to interrupt “speaking” and step back to reflect.
 
 ---
 
@@ -24,14 +17,15 @@ The system does not accumulate facts in weights — it improves at *using* exter
 
 ---
 
-## Memory Compression Loop (Nightly)
+## Memory Compression Loop (Background)
 
-- Daily interactions are logged.
-- Long‑term memory is recompressed overnight using the current model.
-- Compression is **knowledge‑aware**: only genuinely new or still‑relevant information is retained.
-- LoRA training replays interactions **with the compressed memory present**, reinforcing correct memory usage.
-
-Raw data should be retained separately to avoid irreversible loss or feedback loops.
+- Assistant messages are compressed asynchronously in working memory.
+- Episodic long‑term memory is periodically consolidated into a single summary, with the original messages archived separately.
+- Factual memory and model goals are updated from the same episodic batch.
+- Workspace updates are intended to run frequently during responses.
+- Compression always uses the same base knowledge prefix:
+   - to keep using the prefix cache
+   - to ensure the agent knowledge is used during compression
 
 ---
 

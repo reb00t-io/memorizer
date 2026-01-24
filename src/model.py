@@ -15,8 +15,8 @@ MODEL_INFO = {
     "model_id": "gpt-oss-120b",
     "system_prompt": (
         "You are <MODEL_ID>, an agent with memory and goals running in a terminal chat app. "
-        "Messages contain timestamps. The last message has the current time. "
-        "You are talking very concisely. You don't respond with timestamps. Those are added automatically. "
+        "Messages contain timestamps, last message has current time, don't respond with timestamps, they are added automatically! "
+        "You are talking very concisely! Use a very informal human style as if talking in Slack! State your opinion!"
     ),
 }
 
@@ -42,6 +42,7 @@ class Model:
             )
 
     def stream(self, *, max_completion_tokens: int = 1500) -> requests.Response:
+        self._update_workspace()
         model_id = self.model_info["model_id"]
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -181,13 +182,13 @@ class Model:
         if not has_goal or is_placeholder:
             instruction = (
                 "You are a creative autonomous agent. "
-                "Create long-term goals for yourself based on your recent interaction and what you think is a good goal for yourself. "
+                "Create long-term goals for yourself. What you think is a good goal for yourself. Think widely. Don't focus only on the context think about your overall purpose. "
                 "Return a concise goal statement. It doesn't have to be a single goal but can be a combination of multiple goals."
             )
         else:
             instruction = (
-                "Update your long-term goals based on your recent interactions and what you think is a good goal for yourself. "
-                "You can change it in whatever way you see fit. "
+                "Update your long-term goals. What you think is a good goal for yourself. Think widely. Don't focus only on the context think about your overall purpose. "
+                "You can change it to whatever way you see fit. "
                 "Return a concise goal statement. It doesn't have to be a single goal but can be a combination of multiple goals."
                 "Your previous goals will be overridden by what you return here."
             )
@@ -204,15 +205,16 @@ class Model:
     def _update_workspace(self) -> None:
         has_workspace = bool(self.context.workspace.messages())
         if has_workspace:
-            instruction = (
-                "Update the WORKSPACE based on the current conversation. "
-                "Return only the WORKSPACE content in the required structure."
-            )
+            instruction = "Update the WORKSPACE based on the current conversation. "
         else:
-            instruction = (
-                "Create a WORKSPACE based on the current conversation. "
-                "Return only the WORKSPACE content in the required structure."
-            )
+            instruction = "Create a WORKSPACE based on the current conversation. "
+
+        instruction += (
+            "Step back and analyze the user's intent, the problem at hand, and your current understanding. "
+            "Question your assumptions and identify any uncertainties. "
+            "Return only the new WORKSPACE content in below structure. "
+            "Important: be very concise!"
+        )
 
         structure = (
             "WORKSPACE:\n"
@@ -220,8 +222,7 @@ class Model:
             "- Why the user might be asking\n"
             "- Current theory of the problem\n"
             "- Plan\n"
-            "- Open questions / uncertainties\n"
-            "- Next step"
+            "- Open questions / uncertainties"
         )
         prompt = f"{instruction}\n\n{structure}"
 
