@@ -54,7 +54,15 @@ async def _chat_loop(model: Model, *, max_completion_tokens: int) -> None:
         details = usage.get("prompt_tokens_details", None) if usage else None
         prompt_tokens = usage.get("prompt_tokens", 0) if usage else 0
         cached_tokens = details.get("cached_tokens", 0) if details else 0
-        print(f"\n[{prompt_tokens} tokens, {cached_tokens / prompt_tokens * 100:.0f}% cached]\n")
+        cache_pct = (cached_tokens / prompt_tokens * 100) if prompt_tokens else 0
+        sizes = model.context.memory_sizes_bytes()
+        total_size = sum(sizes.values())
+        sizes_pct = " ".join(
+            f"{name[0]}:{(size / total_size * 100):.0f}%"
+            for name, size in sizes.items()
+            if total_size > 0
+        )
+        print(f"\n[{prompt_tokens} tokens, {cache_pct:.0f}% cached]\n[{sizes_pct}]\n")
 
 
 def main() -> int:

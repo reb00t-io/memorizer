@@ -186,6 +186,10 @@ class Memory:
             for i, message in enumerate(self._messages)
         ]
 
+    def rendered_size_bytes(self) -> int:
+        payload = self.to_messages()
+        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
     def _render_role(self, message: Message) -> str:
         return "system" if message.role == "memory" else message.role
 

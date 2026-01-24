@@ -112,22 +112,27 @@ class Context:
         return ctx
 
     def to_messages(self) -> list[dict[str, str]]:
-        all_messages = []
-        # system message is usually stable so put it first
-        # long_term_episodic is also stable at the start
-        # end of long_term_episodic changes at the same time as model_goal and long_term_factual
-        all_messages.extend(self.system.to_messages())
-        all_messages.extend(self.long_term_episodic.to_messages())
-        all_messages.extend(self.model_goal.to_messages())
-        all_messages.extend(self.long_term_factual.to_messages())
-
-        # frequently changing short term goals, but still a bit stable
-        all_messages.extend(self.short_term.to_messages())
-        # recall changes most frequently but we have to put it before working memory
-        # as the model must see the recent conversation in the end
-        all_messages.extend(self.workspace.to_messages())
-        all_messages.extend(self.working.to_messages())
+        all_messages: list[dict[str, str]] = []
+        for _, memory in self._message_layers():
+            all_messages.extend(memory.to_messages())
         return all_messages
+
+    def memory_sizes_bytes(self) -> dict[str, int]:
+        return {
+            name: memory.rendered_size_bytes()
+            for name, memory in self._message_layers()
+        }
+
+    def _message_layers(self) -> list[tuple[str, Memory]]:
+        return [
+            ("system", self.system),
+            ("long_term_episodic", self.long_term_episodic),
+            ("model_goal", self.model_goal),
+            ("long_term_factual", self.long_term_factual),
+            ("short_term", self.short_term),
+            ("workspace", self.workspace),
+            ("working", self.working),
+        ]
 
     def append(self, role: str, content: str) -> None:
         dropped: list[Message] = self.working.append(role, content)
