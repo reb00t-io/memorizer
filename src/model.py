@@ -7,14 +7,20 @@ import requests
 from openai.types.chat import ChatCompletionMessageParam
 
 from src.context import Context
-from src.memory import Message
+from src.message import Message
 
 
 MODEL_INFO = {
     "model_name": "gpt-oss",
     "model_id": "gpt-oss-120b",
-    "system_prompt": "You are <MODEL_ID>, running in a terminal chat app. Messages contain timestamps. The last message has the current time. You are talking very concisely.",
+    "system_prompt": (
+        "You are <MODEL_ID>, an agent with memory and goals running in a terminal chat app. "
+        "Messages contain timestamps. The last message has the current time. "
+        "You are talking very concisely. You don't respond with timestamps. Those are added automatically. "
+    ),
 }
+
+DEFAULT_GOAL_PLACEHOLDER = "You don't have any goal yet. You will come up with one later as YOU see fit."
 
 
 class Model:
@@ -29,6 +35,11 @@ class Model:
         self.base_url = base_url
         self.model_info = model_info or MODEL_INFO
         self.context.system.set_var("MODEL_ID", self.model_info["model_id"])
+        if not self.context.model_goal.messages():
+            self.context.model_goal.append(
+                "memory",
+                DEFAULT_GOAL_PLACEHOLDER,
+            )
 
     def stream(self, *, max_completion_tokens: int = 1500) -> requests.Response:
         model_id = self.model_info["model_id"]
@@ -79,15 +90,156 @@ class Model:
             self.context.working.save()
 
     def _compress_long_term_memory(self) -> None:
-        return
+        long_term_messages = self.context.long_term_episodic.messages()
+        if not long_term_messages:
+            return
+
+        to_compress = [m for m in long_term_messages if m.role != "memory"]
+        if not to_compress:
+            return
+
+        self._update_episodic_memory(long_term_messages, to_compress)
+        self._update_factual_memory(to_compress)
+        self._update_model_goal(to_compress)
+
+    def _update_episodic_memory(
+        self,
+        long_term_messages: list[Message],
+        to_compress: list[Message],
+    ):
+        history = "\n\n".join(
+            f"{m.formatted_timestamp or 'unknown'}\n\n{m.role}: {m.content}" for m in to_compress
+        )
+        instruction = (
+            "Compress the following long-term memory messages into a single concise summary. "
+            "Remove irrelevant information such as detailed timestamps and chitchat, "
+            "Be concise but make sure to also keep important details."
+        )
+        prompt = f"{instruction}\n\n{history}"
+
+        messages = self.context.to_messages()
+        messages.append({"role": "user", "content": prompt})
+        summary = self.nostream(messages).strip()
+        if not summary:
+            return
+
+        start_time = to_compress[0].formatted_timestamp or "unknown"
+        end_time = to_compress[-1].formatted_timestamp or "unknown"
+        summary = f"{start_time} — {end_time}\n\n{summary}"
+
+        self.context.long_term_episodic.add_uncompressed(to_compress)
+        remaining = [m for m in long_term_messages if m.role == "memory"]
+        remaining.append(Message(role="memory", content=summary))
+        self.context.long_term_episodic.set_messages(remaining)
+
+    def _update_factual_memory(self, messages: list[Message]) -> None:
+        if not messages:
+            return
+
+        history = "\n".join(f"{m.role}: {m.content}" for m in messages)
+        has_facts = bool(self.context.long_term_factual.messages())
+        if not has_facts:
+            instruction = (
+                "Create a factual memory block from the following recent conversations. "
+                "This block should contain stable, verifiable facts, preferences, and constraints. "
+                "Use bullet points with potential sub-bullets. "
+                "Add timestamps where useful. "
+                "If possible, add information about the source of the facts and whether you question them. "
+                "Keep it concise."
+            )
+        else:
+            instruction = (
+                "Update your factual memory from the following recent conversations. "
+                "Use bullet points with potential sub-bullets. "
+                "Add timestamps where useful. "
+                "You may change the structure as needed. "
+                "Decide what facts must be overridden, removed, added, etc. "
+                "If possible, add information about the source of the facts and if you question them or not. "
+                "Make sure to not lose important information but stay concise."
+            )
+        prompt = f"{instruction}\n\n{history}"
+
+        base_messages = self.context.to_messages()
+        base_messages.append({"role": "user", "content": prompt})
+        facts = self.nostream(base_messages).strip()
+        if not facts:
+            return
+
+        self.context.long_term_factual.set_messages([Message(role="memory", content=facts)])
+
+    def _update_model_goal(self, messages: list[Message]) -> None:
+        if not messages:
+            return
+
+        history = "\n".join(f"{m.role}: {m.content}" for m in messages)
+        current_goal = self.context.model_goal.messages()
+        has_goal = bool(current_goal)
+        is_placeholder = (
+            has_goal
+            and DEFAULT_GOAL_PLACEHOLDER in current_goal[0].content
+        )
+        if not has_goal or is_placeholder:
+            instruction = (
+                "You are a creative autonomous agent. "
+                "Create long-term goals for yourself based on your recent interaction and what you think is a good goal for yourself. "
+                "Return a concise goal statement. It doesn't have to be a single goal but can be a combination of multiple goals."
+            )
+        else:
+            instruction = (
+                "Update your long-term goals based on your recent interactions and what you think is a good goal for yourself. "
+                "You can change it in whatever way you see fit. "
+                "Return a concise goal statement. It doesn't have to be a single goal but can be a combination of multiple goals."
+                "Your previous goals will be overridden by what you return here."
+            )
+        prompt = f"{instruction}\n\n{history}"
+
+        base_messages = self.context.to_messages()
+        base_messages.append({"role": "user", "content": prompt})
+        goal = self.nostream(base_messages).strip()
+        if not goal:
+            return
+
+        self.context.model_goal.set_messages([Message(role="memory", content=goal)])
+
+    def _update_workspace(self) -> None:
+        has_workspace = bool(self.context.workspace.messages())
+        if has_workspace:
+            instruction = (
+                "Update the WORKSPACE based on the current conversation. "
+                "Return only the WORKSPACE content in the required structure."
+            )
+        else:
+            instruction = (
+                "Create a WORKSPACE based on the current conversation. "
+                "Return only the WORKSPACE content in the required structure."
+            )
+
+        structure = (
+            "WORKSPACE:\n"
+            "- User intent (hypothesis)\n"
+            "- Why the user might be asking\n"
+            "- Current theory of the problem\n"
+            "- Plan\n"
+            "- Open questions / uncertainties\n"
+            "- Next step"
+        )
+        prompt = f"{instruction}\n\n{structure}"
+
+        base_messages = self.context.to_messages()
+        base_messages.append({"role": "user", "content": prompt})
+        workspace = self.nostream(base_messages).strip()
+        if not workspace:
+            return
+
+        self.context.workspace.set_messages([Message(role="memory", content=workspace)])
 
     def _compress_message(self, message: Message) -> str | None:
         if len(message.content) < 150:
             return message.content
         first_words = " ".join(message.content.split()[:6])
         system_instruction = (
-            "Compress the messahe from time "
-            f"{message.timestamp or 'unknown'}, starting with \"{first_words}\". "
+            "Compress the message from time "
+            f"{message.formatted_timestamp or 'unknown'}, starting with \"{first_words}\". "
             "Be factual and terse."
         )
         messages = self.context.to_messages()
@@ -110,43 +262,3 @@ class Model:
         if not content:
             return ""
         return content
-
-    def compress(self) -> str:
-        short_term_text = self.context.short_term.to_string().strip()
-        working_text = self.context.working.to_string().strip()
-
-        combined = "\n".join(
-            part for part in [short_term_text, working_text] if part
-        ).strip()
-
-        if not combined:
-            self.context.short_term.clear()
-            self.context.working.clear()
-            return ""
-
-        system_instruction = (
-            "You are a memory compressor. Extract the most important information "
-            "from the conversation for long-term memory. Be concise, stable, and factual. "
-            "Prefer bullets. Include only enduring facts, preferences, decisions, and goals."
-        )
-        user_content = (
-            "Compress the following messages into a concise long-term memory summary:\n\n"
-            f"{combined}"
-        )
-        prompt = f"{system_instruction}\n\n{user_content}"
-
-        messages = self.context.to_messages()
-        messages.append({"role": "user", "content": prompt})
-
-        summary = self.nostream(messages).strip()
-
-        if summary:
-            self.context.long_term.append(
-                "system",
-                "Long-term memory update (compressed from short-term + working memory):\n"
-                + summary,
-            )
-
-        self.context.short_term.clear()
-        self.context.working.clear()
-        return summary

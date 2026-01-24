@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 from typing import Iterable, Optional
 
-
-@dataclass(slots=True)
-class Message:
-    role: str
-    content: str
-    compressed_content: str | None = None
-    timestamp: str | None = None
+from .message import Message
 
 
 class Memory:
@@ -30,6 +23,8 @@ class Memory:
         drop_chunk_size: int = 1,
         is_working_memory: bool = False,
         is_short_term_memory: bool = False,
+        is_long_term_memory: bool = False,
+        render_prefix: str | None = None,
         persist_path: str | Path | None = None,
     ) -> None:
         self._allowed_roles = allowed_roles
@@ -38,7 +33,10 @@ class Memory:
         self._use_compressed_content = not is_working_memory
         self._include_timestamp = is_working_memory or is_short_term_memory
         self._is_working_memory = is_working_memory
+        self._is_long_term_memory = is_long_term_memory
+        self._render_prefix = render_prefix
         self._messages: list[Message] = []
+        self._uncompressed: list[Message] = []
         self._persist_path = Path(persist_path).expanduser() if persist_path is not None else None
 
         if self._persist_path is not None:
@@ -56,6 +54,15 @@ class Memory:
 
     def messages(self) -> list[Message]:
         return list(self._messages)
+
+    def uncompressed(self) -> list[Message]:
+        return list(self._uncompressed)
+
+    def add_uncompressed(self, messages: Iterable[Message]) -> None:
+        if not self._is_long_term_memory:
+            return
+        self._uncompressed.extend(messages)
+        self._save_to_disk()
 
     def set_messages(self, messages: Iterable[dict[str, str] | Message]) -> None:
         self._messages.clear()
@@ -79,7 +86,15 @@ class Memory:
             content = message.content.replace(token, str(value))
             if content != message.content:
                 changed = True
-                updated.append(Message(role=message.role, content=content))
+                updated.append(
+                    Message(
+                        role=message.role,
+                        content=content,
+                        compressed_content=message.compressed_content,
+                        timestamp=message.timestamp,
+                        formatted_timestamp=message.formatted_timestamp,
+                    )
+                )
             else:
                 updated.append(message)
 
@@ -98,21 +113,13 @@ class Memory:
                 role = message.role
                 content = message.content
             else:
-                role = message.get("role")
-                content = message.get("content")
-                compressed_content = message.get("compressed_content")
-                timestamp = message.get("timestamp")
-                if role is None or content is None:
-                    raise ValueError("Message dict must contain 'role' and 'content'")
-                message = Message(
-                    role=str(role),
-                    content=str(content),
-                    compressed_content=str(compressed_content) if compressed_content is not None else None,
-                    timestamp=str(timestamp) if timestamp is not None else None,
-                )
+                message = self._parse_message(message)
 
             if message.timestamp is None:
                 message.timestamp = datetime.now(timezone.utc).isoformat()
+
+            if message.formatted_timestamp is None and message.timestamp is not None:
+                message.formatted_timestamp = self._format_timestamp(message.timestamp)
 
             self._validate(message)
 
@@ -126,35 +133,82 @@ class Memory:
 
             self._messages.append(message)
 
+    def _parse_message(self, message: dict[str, str]) -> Message:
+        role = message.get("role")
+        content = message.get("content")
+        compressed_content = message.get("compressed_content")
+        timestamp = message.get("timestamp")
+        if role is None or content is None:
+            raise ValueError("Message dict must contain 'role' and 'content'")
+        formatted_timestamp = self._format_timestamp(str(timestamp)) if timestamp is not None else None
+        return Message(
+            role=str(role),
+            content=str(content),
+            compressed_content=str(compressed_content) if compressed_content is not None else None,
+            timestamp=str(timestamp) if timestamp is not None else None,
+            formatted_timestamp=formatted_timestamp,
+        )
+
+    def _parse_messages(self, messages: Iterable[dict[str, str]]) -> list[Message]:
+        return [self._parse_message(message) for message in messages]
+
     def _render_content(self, m: Message, idx: int) -> str:
         compress = self._use_compressed_content and m.compressed_content is not None
         content = m.compressed_content if compress and m.compressed_content else m.content
+
+        if idx == 0 and self._render_prefix:
+            content = f"{self._render_prefix}\n\n{content}"
         if not self._include_timestamp:
             return content
 
         # no timestamp for the last two messages and current time for the last message
         # (last we don't want the model to start emitting timestamps itself)
         timestamp = None
-        if idx < len(self._messages) - 2 and m.timestamp is not None:
-            try:
-                parsed = m.timestamp.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(parsed)
-                timestamp = dt.strftime("%Y-%m-%d %H:%M")
-            except ValueError:
-                timestamp = m.timestamp
+        if idx < len(self._messages) - 2 and m.formatted_timestamp is not None:
+            timestamp = m.formatted_timestamp
 
         elif idx == len(self._messages) - 1:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         return content if timestamp is None else f"{timestamp}\n\n{content}"
 
-    def to_messages(self) -> list[dict[str, str]]:
-        return [{"role": m.role, "content": self._render_content(m, i)} for i, m in enumerate(self._messages)]
+    def _format_timestamp(self, value: str) -> str:
+        try:
+            parsed = value.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(parsed)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
 
-    def _serialize(self) -> list[dict[str, str]]:
-        payload: list[dict[str, str]] = []
+    def to_messages(self) -> list[dict[str, str]]:
+        return [
+            {"role": self._render_role(message), "content": self._render_content(message, i)}
+            for i, message in enumerate(self._messages)
+        ]
+
+    def _render_role(self, message: Message) -> str:
+        return "system" if message.role == "memory" else message.role
+
+    def _serialize(self) -> list[dict[str, object]]:
+        payload: list[dict[str, object]] = []
         for message in self._messages:
-            item: dict[str, str] = {"role": message.role, "content": message.content}
+            item: dict[str, object] = {"role": message.role, "content": message.content}
+            if message.compressed_content is not None:
+                item["compressed_content"] = message.compressed_content
+            if message.timestamp is not None:
+                item["timestamp"] = message.timestamp
+            payload.append(item)
+        if not self._is_long_term_memory:
+            return payload
+
+        return [
+            {"messages": payload, "uncompressed": self._serialize_uncompressed()},
+        ]
+
+    def _serialize_uncompressed(self) -> list[dict[str, object]]:
+        payload: list[dict[str, object]] = []
+        for message in self._uncompressed:
+            item: dict[str, object] = {"role": message.role, "content": message.content}
             if message.compressed_content is not None:
                 item["compressed_content"] = message.compressed_content
             if message.timestamp is not None:
@@ -196,6 +250,19 @@ class Memory:
 
         if not isinstance(data, list):
             self._messages.clear()
+            return
+
+        if (
+            self._is_long_term_memory
+            and len(data) == 1
+            and isinstance(data[0], dict)
+            and "messages" in data[0]
+        ):
+            payload = data[0]
+            raw_messages = payload.get("messages", [])
+            raw_uncompressed = payload.get("uncompressed", [])
+            self._messages = self._parse_messages(raw_messages)
+            self._uncompressed = self._parse_messages(raw_uncompressed)
             return
 
         self._messages.clear()
