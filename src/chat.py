@@ -62,7 +62,7 @@ async def _chat_loop(model: Model, *, max_completion_tokens: int) -> None:
             for name, size in sizes.items()
             if total_size > 0
         )
-        print(f"\n[{prompt_tokens} tokens, {cache_pct:.0f}% cached]\n[{sizes_pct}]\n")
+        print(f"\n[{prompt_tokens} tokens, {cache_pct:.0f}% cached, {sizes_pct}]\n")
 
 
 def main() -> int:
