@@ -81,6 +81,7 @@ class Context:
                               persist_path=persist_model_goal_path),
             workspace=Memory(allowed_roles=goal_roles,
                              max_messages=1,
+                             render_prefix="#Workspace (DO NOT expose unless asked!)",
                              persist_path=persist_workspace_path),
             long_term_episodic=Memory(allowed_roles=long_term_roles,
                              is_long_term_memory=True,

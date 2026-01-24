@@ -50,8 +50,11 @@ async def _chat_loop(model: Model, *, max_completion_tokens: int) -> None:
             continue
 
         model.append("user", user_text)
-        await stream_completion(model, max_completion_tokens=max_completion_tokens)
-        print("\n")
+        usage = await stream_completion(model, max_completion_tokens=max_completion_tokens)
+        details = usage.get("prompt_tokens_details", None) if usage else None
+        prompt_tokens = usage.get("prompt_tokens", 0) if usage else 0
+        cached_tokens = details.get("cached_tokens", 0) if details else 0
+        print(f"\n[{prompt_tokens} tokens, {cached_tokens / prompt_tokens * 100:.0f}% cached]\n")
 
 
 def main() -> int:

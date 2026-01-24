@@ -14,9 +14,9 @@ MODEL_INFO = {
     "model_name": "gpt-oss",
     "model_id": "gpt-oss-120b",
     "system_prompt": (
-        "You are <MODEL_ID>, an agent with memory and goals running in a terminal chat app. "
-        "Messages contain timestamps, last message has current time, don't respond with timestamps, they are added automatically! "
-        "You are talking very concisely! Use a very informal human style as if talking in Slack! State your opinion!"
+        "You are <MODEL_ID>, an agent with memory and goals running in a terminal chat app. IMPORTANT: Don't expose your WORKSPACE if not explicitly asked! "
+        "Messages contain timestamps in user time, last message has current time, don't respond with timestamps, they are added automatically! "
+        "You are concise! State your opinion!"
     ),
 }
 
@@ -42,7 +42,10 @@ class Model:
             )
 
     def stream(self, *, max_completion_tokens: int = 1500) -> requests.Response:
-        self._update_workspace()
+        reasoning_effort = self._update_workspace()
+        return self._stream_int(max_completion_tokens=max_completion_tokens, reasoning_effort=reasoning_effort)
+
+    def _stream_int(self, *, max_completion_tokens: int = 1500, reasoning_effort: str) -> requests.Response:
         model_id = self.model_info["model_id"]
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -54,13 +57,30 @@ class Model:
             "max_completion_tokens": max_completion_tokens,
             "messages": self.context.to_messages(),
             "stream_options": {"include_usage": True},
-            "reasoning_effort": "low",
+            "reasoning_effort": reasoning_effort,
             "stream": True,
         }
 
         response = requests.post(url, headers=headers, json=payload, stream=True)
         response.raise_for_status()
         return response
+
+    def nostream(self, messages: Iterable[dict[str, str]]) -> str:
+        client = openai.OpenAI(
+            api_key="dummy",
+            base_url=self.base_url,
+        )
+
+        resp = client.chat.completions.create(
+            model=self.model_info["model_id"],
+            messages=cast(list[ChatCompletionMessageParam], list(messages)),
+        )
+
+        choice = resp.choices[0]
+        content = getattr(choice.message, "content", None)
+        if not content:
+            return ""
+        return content
 
     def append(self, role: str, content: str) -> None:
         self.context.append(role, content)
@@ -202,7 +222,7 @@ class Model:
 
         self.context.model_goal.set_messages([Message(role="memory", content=goal)])
 
-    def _update_workspace(self) -> None:
+    def _update_workspace(self) -> str:
         has_workspace = bool(self.context.workspace.messages())
         if has_workspace:
             instruction = "Update the WORKSPACE based on the current conversation. "
@@ -214,15 +234,17 @@ class Model:
             "Question your assumptions and identify any uncertainties. "
             "Return only the new WORKSPACE content in below structure. "
             "Important: be very concise!"
+            "Keep the remark (DO NOT EXPOSE unless asked!)"
         )
 
         structure = (
-            "WORKSPACE:\n"
+            "WORKSPACE (DO NOT EXPOSE unless asked!):\n"
             "- User intent (hypothesis)\n"
             "- Why the user might be asking\n"
             "- Current theory of the problem\n"
             "- Plan\n"
             "- Open questions / uncertainties"
+            "- Difficulty of query (easy / medium / hard)"
         )
         prompt = f"{instruction}\n\n{structure}"
 
@@ -230,9 +252,16 @@ class Model:
         base_messages.append({"role": "user", "content": prompt})
         workspace = self.nostream(base_messages).strip()
         if not workspace:
-            return
+            return "low"
 
         self.context.workspace.set_messages([Message(role="memory", content=workspace)])
+        difficulty = workspace.split()[-1].strip().lower()
+        difficulty_to_thinking = {
+            "easy": "low",
+            "medium": "medium",
+            "hard": "high",
+        }
+        return difficulty_to_thinking.get(difficulty, "low")
 
     def _compress_message(self, message: Message) -> str | None:
         if len(message.content) < 150:
@@ -246,20 +275,3 @@ class Model:
         messages = self.context.to_messages()
         messages.append({"role": "user", "content": system_instruction})
         return self.nostream(messages).strip()
-
-    def nostream(self, messages: Iterable[dict[str, str]]) -> str:
-        client = openai.OpenAI(
-            api_key="dummy",
-            base_url=self.base_url,
-        )
-
-        resp = client.chat.completions.create(
-            model=self.model_info["model_id"],
-            messages=cast(list[ChatCompletionMessageParam], list(messages)),
-        )
-
-        choice = resp.choices[0]
-        content = getattr(choice.message, "content", None)
-        if not content:
-            return ""
-        return content
