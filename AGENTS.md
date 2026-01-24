@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Memorizer** is a Python library that provides a structured, long‑term memory architecture for large language models. It combines **in‑context learning (ICL)** with periodic **LoRA fine‑tuning** so that the model can retain facts, preferences, and behaviors over time without altering the base model weights.
+**Memorizer** is a Python library that provides a structured, long‑term memory architecture for large language models with a **model‑managed context**, message timestamps, and background compression to keep long conversations compact.
 
 The core idea is a **fixed‑order context layout** that separates:
 
@@ -12,7 +12,7 @@ The core idea is a **fixed‑order context layout** that separates:
 4. **Recall memory** – optional, on‑demand retrieval of older information.
 5. **Working memory** – the active conversation that drives generation.
 
-The `Context` class (see `src/context.py`) orchestrates these sections, providing utilities to append messages, compress short‑term + working memory into long‑term memory, and render the full context for a completion request.
+The `Context` class (see `src/context.py`) orchestrates these sections, while the `Model` class (see `src/model.py`) handles streaming requests, synchronous calls, and compression utilities.
 
 ## Installation
 
@@ -48,17 +48,17 @@ python -m src.chat
 This starts a REPL where you can type messages. The system automatically:
 
 - Stores user and assistant messages in the **working** memory section.
-- Calls the `stream_completion` function to obtain a response from the configured LLM.
-- Allows you to compress the short‑term conversation into **long‑term** memory using `Context.compress()` (called manually or via a scheduled job).
+- Calls the `stream_completion` function to obtain a response from the configured `Model`.
+- Compresses older assistant messages in the background and stores them as `compressed_content`.
 
 ## Core Components
 
 | Module | Purpose |
 |--------|---------|
-| `src/context.py` | Defines the `Context` data structure with fixed memory sections and compression logic. |
-| `src/memory.py` | Lightweight wrapper handling role‑based message storage and persistence to JSON files. |
-| `src/completion.py` | Provides streaming LLM completion utilities used by the chat loop. |
-| `src/llm_nostream.py` | Synchronous LLM call used for summarisation during compression. |
+| `src/context.py` | Defines the `Context` data structure with fixed memory sections and timestamped rendering. |
+| `src/memory.py` | Message storage, persistence, and configurable uncompressed tail handling. |
+| `src/model.py` | Model configuration, streaming, synchronous calls, and compression helpers. |
+| `src/completion.py` | Streaming completion loop used by the chat interface. |
 | `src/chat.py` | Interactive command‑line interface built with `prompt_toolkit`. |
 
 ## Persisted Data

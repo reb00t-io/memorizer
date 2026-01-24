@@ -18,16 +18,17 @@ def test_context_to_messages_order_and_roles() -> None:
     ctx.append("assistant", "WK assistant")
 
     messages = ctx.to_messages()
-    assert messages[0] == {"role": "system", "content": "You are helpful."}
+    simplified = [{"role": m["role"], "content": m["content"]} for m in messages]
+    assert simplified[0] == {"role": "system", "content": "You are helpful."}
 
     # Ensure fixed section order by checking subsequences
-    assert {"role": "user", "content": "LT user"} in messages
-    assert {"role": "user", "content": "ST user"} in messages
-    assert {"role": "user", "content": "WK user"} in messages
+    assert {"role": "user", "content": "LT user"} in simplified
+    assert {"role": "user", "content": "ST user"} in simplified
+    assert {"role": "user", "content": "WK user"} in simplified
 
-    idx_lt = messages.index({"role": "user", "content": "LT user"})
-    idx_st = messages.index({"role": "user", "content": "ST user"})
-    idx_wk = messages.index({"role": "user", "content": "WK user"})
+    idx_lt = simplified.index({"role": "user", "content": "LT user"})
+    idx_st = simplified.index({"role": "user", "content": "ST user"})
+    idx_wk = simplified.index({"role": "user", "content": "WK user"})
     assert idx_lt < idx_st < idx_wk
 
 
@@ -66,25 +67,29 @@ def test_to_string_contains_sections_in_order() -> None:
 def test_context_append_writes_to_working_memory() -> None:
     ctx = Context.create(system_prompt="S", persist=False)
     ctx.append("user", "hello")
-    assert ctx.working.to_messages() == [{"role": "user", "content": "hello"}]
+    messages = ctx.working.to_messages()
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"].endswith("\n\nhello")
 
 
 def test_context_compress_appends_to_long_term_and_clears(monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.llm_nostream as llm_mod
+    from src.model import Model
 
-    def fake_llm_nostream(messages):
+    def fake_nostream(self, messages):
         assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
+        assert messages[-1]["role"] == "user"
         return "- compressed summary"
 
-    monkeypatch.setattr(llm_mod, "llm_nostream", fake_llm_nostream)
+    monkeypatch.setattr(Model, "nostream", fake_nostream)
 
     ctx = Context.create(system_prompt="S", persist=False)
     ctx.short_term.append("user", "ST1")
     ctx.short_term.append("assistant", "ST2")
     ctx.append("user", "WK1")
 
-    summary = ctx.compress()
+    model = Model(ctx)
+    summary = model.compress()
     assert summary == "- compressed summary"
 
     # short-term and working cleared

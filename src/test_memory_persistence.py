@@ -22,10 +22,14 @@ def test_memory_persists_on_modify(tmp_path) -> None:
     m = Memory(allowed_roles={"user", "assistant"}, persist_path=p)
 
     m.append("user", "hi")
-    assert json.loads(p.read_text()) == [{"role": "user", "content": "hi"}]
+    data = json.loads(p.read_text())
+    assert [{"role": d["role"], "content": d["content"]} for d in data] == [
+        {"role": "user", "content": "hi"}
+    ]
 
     m.append("assistant", "hello")
-    assert json.loads(p.read_text()) == [
+    data = json.loads(p.read_text())
+    assert [{"role": d["role"], "content": d["content"]} for d in data] == [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "hello"},
     ]

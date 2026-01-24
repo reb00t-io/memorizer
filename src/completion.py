@@ -1,23 +1,17 @@
-import requests
 import json
 import time
 import asyncio
 
 from src.context import Context
+from src.model import MODEL_INFO, Model
 
 
-MODEL_INFO = {
-    "model_name": "gpt-oss",
-    "model_id": "gpt-oss-120b",
-}
-
-
-async def stream_completion(context: Context, max_completion_tokens: int = 1500):
+async def stream_completion(model: Model, max_completion_tokens: int = 1500):
     """
     Stream LLM completion using a local OpenAI-compatible endpoint.
 
     Args:
-        context: Context object containing system/long-term/short-term/recall/working memories
+        model: Model instance containing request config and context
         max_completion_tokens: Maximum tokens to generate (default: 1500)
 
     Returns:
@@ -28,27 +22,7 @@ async def stream_completion(context: Context, max_completion_tokens: int = 1500)
     assistant_text_parts: list[str] = []
 
     try:
-        base_url = "http://[::1]:8080/v1"
-        model = MODEL_INFO["model_id"]
-
-        # Prepare API request
-        url = f"{base_url}/chat/completions"
-        headers = {
-            "Authorization": "Bearer placeholder",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": model,
-            "max_completion_tokens": max_completion_tokens,
-            "messages": context.to_messages(),
-            "stream_options": {"include_usage": True},
-            "reasoning_effort": "low",
-            "stream": True
-        }
-
-        # Make streaming request
-        response = requests.post(url, headers=headers, json=payload, stream=True)
-        response.raise_for_status()
+        response = model.stream(max_completion_tokens=max_completion_tokens)
 
         # Stream and process response
         reasoning = False
@@ -98,7 +72,7 @@ async def stream_completion(context: Context, max_completion_tokens: int = 1500)
 
         assistant_text = "".join(assistant_text_parts).strip()
         if assistant_text:
-            context.append("assistant", assistant_text)
+            model.append("assistant", assistant_text)
 
         return usage
 
@@ -125,9 +99,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    ctx = Context.create()
+    ctx = Context.create(system_prompt=MODEL_INFO["system_prompt"])
+    ctx.system.set_var("MODEL_ID", MODEL_INFO["model_id"])
     ctx.append("user", args.prompt)
-    asyncio.run(stream_completion(ctx, max_completion_tokens=args.max_completion_tokens))
+    model = Model(ctx)
+    asyncio.run(stream_completion(model, max_completion_tokens=args.max_completion_tokens))
     return 0
 
 
