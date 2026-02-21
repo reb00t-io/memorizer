@@ -12,7 +12,7 @@ The core idea is a **fixed‑order context layout** that separates:
 4. **Recall memory** – optional, on‑demand retrieval of older information.
 5. **Working memory** – the active conversation that drives generation.
 
-The `Context` class (see `src/context.py`) orchestrates these sections, while the `Model` class (see `src/model.py`) handles streaming requests, synchronous calls, and compression utilities.
+The `Context` class (see `src/model/context.py`) orchestrates these sections, while the `Model` class (see `src/model/model.py`) handles streaming requests, synchronous calls, and compression utilities.
 
 ## Installation
 
@@ -39,10 +39,10 @@ Development dependencies include `pytest` for running the test suite.
 
 ## Quick Start
 
-The package ships with a simple interactive chat interface (`src/chat.py`). To launch it:
+The package ships with a simple interactive chat interface (`src/chat/chat.py`). To launch it:
 
 ```bash
-python -m src.chat
+python -m src.chat.chat
 ```
 
 This starts a REPL where you can type messages. The system automatically:
@@ -55,11 +55,11 @@ This starts a REPL where you can type messages. The system automatically:
 
 | Module | Purpose |
 |--------|---------|
-| `src/context.py` | Defines the `Context` data structure with fixed memory sections and timestamped rendering. |
-| `src/memory.py` | Message storage, persistence, and configurable uncompressed tail handling. |
-| `src/model.py` | Model configuration, streaming, synchronous calls, and compression helpers. |
-| `src/completion.py` | Streaming completion loop used by the chat interface. |
-| `src/chat.py` | Interactive command‑line interface built with `prompt_toolkit`. |
+| `src/model/context.py` | Defines the `Context` data structure with fixed memory sections and timestamped rendering. |
+| `src/model/memory.py` | Message storage, persistence, and configurable uncompressed tail handling. |
+| `src/model/model.py` | Model configuration, streaming, synchronous calls, and compression helpers. |
+| `src/chat/completion.py` | Streaming completion loop used by the chat interface. |
+| `src/chat/chat.py` | Interactive command‑line interface built with `prompt_toolkit`. |
 
 ## Persisted Data
 

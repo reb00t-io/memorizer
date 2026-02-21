@@ -1,6 +1,6 @@
 import json
 
-from src.memory import Memory
+from src.model.memory import Memory
 
 
 def test_memory_loads_from_file_on_init(tmp_path) -> None:

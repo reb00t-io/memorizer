@@ -7,9 +7,9 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
 
-from src.completion import stream_completion
-from src.model import MODEL_INFO, Model
-from src.context import Context
+from src.chat.completion import stream_completion
+from src.model.model import MODEL_INFO, Model
+from src.model.context import Context
 
 
 DEFAULT_MAX_COMPLETION_TOKENS = 8000

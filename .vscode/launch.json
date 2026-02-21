@@ -18,7 +18,7 @@
             "name": "chat",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/src/chat.py",
+            "program": "${workspaceFolder}/src/chat/chat.py",
             "console": "integratedTerminal",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"

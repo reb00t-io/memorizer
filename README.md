@@ -11,12 +11,12 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install .
 
 # Run interactive chat
-python -m src.chat
+python -m src.chat.chat
 ```
 
 ## Core Concepts
 - **Fixed context layout**: system, long‑term, short‑term, recall (optional), working.
-- **Context class** (`src/context.py`): manages memory sections, appends messages, compresses short‑term + working into long‑term.
+- **Context class** (`src/model/context.py`): manages memory sections, appends messages, compresses short‑term + working into long‑term.
 - **Compression** uses a summarisation LLM to create concise long‑term updates.
 
 ## Documentation

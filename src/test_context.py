@@ -1,6 +1,6 @@
 import pytest
 
-from src.context import Context
+from src.model.context import Context
 
 
 def test_context_to_messages_order_and_roles() -> None:

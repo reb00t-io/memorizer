@@ -2,8 +2,8 @@ import json
 import time
 import asyncio
 
-from src.context import Context
-from src.model import MODEL_INFO, Model
+from src.model.context import Context
+from src.model.model import MODEL_INFO, Model
 
 
 async def stream_completion(model: Model, max_completion_tokens: int = 1500):

@@ -6,8 +6,8 @@ import openai
 import requests
 from openai.types.chat import ChatCompletionMessageParam
 
-from src.context import Context
-from src.message import Message
+from .context import Context
+from .message import Message
 
 
 MODEL_INFO = {
