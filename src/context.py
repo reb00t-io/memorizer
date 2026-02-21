@@ -67,8 +67,6 @@ class Context:
 
         system = Memory(allowed_roles={"system"},
                         max_messages=1, persist_path=persist_system_path)
-        if system_prompt:
-            system.append("system", system_prompt)
 
         user_assistant = {"user", "assistant"}
         long_term_roles = {"system", "user", "assistant", "memory"}
@@ -108,8 +106,13 @@ class Context:
             ),
             layers=[],
         )
+        ctx.set_system_prompt(system_prompt)
         ctx.layers = [ctx.working, ctx.short_term, ctx.long_term_episodic]
         return ctx
+
+    def set_system_prompt(self, system_prompt: str) -> None:
+        if system_prompt:
+            self.system.append("system", system_prompt)
 
     def to_messages(self) -> list[dict[str, str]]:
         all_messages: list[dict[str, str]] = []
