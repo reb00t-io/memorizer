@@ -109,10 +109,7 @@ class Memory:
         dropped: Optional[list[Message]] = None,
     ) -> None:
         for message in messages:
-            if isinstance(message, Message):
-                role = message.role
-                content = message.content
-            else:
+            if not isinstance(message, Message):
                 message = self._parse_message(message)
 
             if message.timestamp is None:
