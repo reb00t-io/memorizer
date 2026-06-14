@@ -1,0 +1,79 @@
+name: Release
+
+# Runs on every push to main: tests, then bumps the version, tags the repo and
+# publishes a GitHub release. The version starts at 1.0.0 and the patch number is
+# incremented on each release.
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[dev,chat]"
+      - name: Run tests
+        run: python -m pytest tests -q
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          set -euo pipefail
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$latest" ]; then
+            # First release uses the version declared in pyproject.toml (1.0.0).
+            next=$(grep -E '^version = ' pyproject.toml | head -n1 | sed -E 's/version = "(.*)"/\1/')
+          else
+            v=${latest#v}
+            IFS='.' read -r major minor patch <<< "$v"
+            patch=$((patch + 1))
+            next="${major}.${minor}.${patch}"
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "Next release: v$next"
+
+      - name: Update pyproject.toml version
+        run: |
+          set -euo pipefail
+          sed -i -E 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' pyproject.toml
+
+      - name: Commit and tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          # Skip the commit if the version was already in sync (e.g. first release).
+          git commit -m "chore: release ${{ steps.version.outputs.tag }} [skip ci]" || echo "nothing to commit"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin HEAD:main
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
