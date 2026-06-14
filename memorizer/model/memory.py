@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import tempfile
 from typing import Iterable, Optional
 
 from .message import Message
@@ -275,6 +276,14 @@ class Memory:
 
         self._persist_path.parent.mkdir(parents=True, exist_ok=True)
         payload = self._serialize()
-        tmp_path = self._persist_path.with_suffix(self._persist_path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp_path, self._persist_path)
+        fd, tmp_str = tempfile.mkstemp(dir=self._persist_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            os.replace(tmp_str, self._persist_path)
+        except Exception:
+            try:
+                os.unlink(tmp_str)
+            except OSError:
+                pass
+            raise

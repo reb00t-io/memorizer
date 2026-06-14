@@ -4,29 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memorizer"
-version = "0.1.0"
-description = "TODO."
+version = "1.0.0"
+description = "Structured, long-term memory architecture for LLMs with a model-managed context."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Marko Rosenmüller" }]
-keywords = []
+keywords = ["llm", "memory", "context", "openai", "chat"]
 dependencies = [
   "requests>=2.31",
-  "openai>=1.0",
-  "prompt-toolkit>=3.0",
 ]
 
-[project.scripts]
-
-[tool.setuptools]
-package-dir = {"" = "."}
-
-[tool.setuptools.packages.find]
-include = ["reb00t*"]
-exclude = ["tests*", "docs*"]
-
 [project.optional-dependencies]
+chat = [
+  "prompt-toolkit>=3.0",
+]
 dev = [
   "pytest>=8.2",
 ]
+
+[project.scripts]
+memorizer-chat = "memorizer.chat.chat:main"
+
+[tool.setuptools.packages.find]
+include = ["memorizer*"]
+exclude = ["tests*", "docs*"]

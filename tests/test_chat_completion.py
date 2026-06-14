@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from src.chat.completion import stream_completion
+from memorizer.chat.completion import stream_completion
 
 
 class _FakeResponse:

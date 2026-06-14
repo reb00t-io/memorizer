@@ -111,8 +111,13 @@ class Context:
         return ctx
 
     def set_system_prompt(self, system_prompt: str) -> None:
-        if system_prompt:
-            self.system.append("system", system_prompt)
+        if not system_prompt:
+            return
+        # Skip if unchanged — avoids redundant disk writes on every LLM call.
+        existing = self.system.messages()
+        if existing and existing[0].content == system_prompt:
+            return
+        self.system.append("system", system_prompt)
 
     def to_messages(self) -> list[dict[str, str]]:
         all_messages: list[dict[str, str]] = []

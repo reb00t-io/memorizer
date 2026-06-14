@@ -12,37 +12,58 @@ The core idea is a **fixed‑order context layout** that separates:
 4. **Recall memory** – optional, on‑demand retrieval of older information.
 5. **Working memory** – the active conversation that drives generation.
 
-The `Context` class (see `src/model/context.py`) orchestrates these sections, while the `Model` class (see `src/model/model.py`) handles streaming requests, synchronous calls, and compression utilities.
+The `Context` class (see `memorizer/model/context.py`) orchestrates these sections, while the `Model` class (see `memorizer/model/model.py`) handles streaming requests, synchronous calls, and compression utilities.
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/memorizer.git
+git clone https://github.com/reb00t-io/memorizer.git
 cd memorizer
 
 # Create a virtual environment (optional but recommended)
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install the package and its dependencies
-pip install .
+# Install for local development (core + chat CLI + tests)
+pip install -e ".[dev,chat]"
+
+# ...or as a plain library dependency in another project
+#   pip install "git+https://github.com/reb00t-io/memorizer.git"
 ```
 
 The project requires **Python 3.12+** and the following runtime dependencies (as declared in `pyproject.toml`):
 
 - `requests>=2.31`
-- `openai>=1.0`
-- `prompt-toolkit>=3.0`
+- `prompt-toolkit>=3.0` (optional, only for the chat CLI — `pip install memorizer[chat]`)
 
-Development dependencies include `pytest` for running the test suite.
+Note: `openai` is **not** a dependency. Development dependencies include `pytest` (the `dev` extra) for running the test suite.
+
+## Library usage
+
+`Model` can be driven directly from another project, without the chat CLI. The model id, endpoint, system prompt and completion-token budget are all provided at startup (there is no default for `max_completion_tokens`):
+
+```python
+from memorizer import Model
+
+model = Model.create(
+    model_id="gpt-oss-120b",
+    base_url="http://host:8080/v1",
+    system_prompt="You are <MODEL_ID>.",
+    max_completion_tokens=1500,
+)
+model.context.append("user", "Hello!")
+text, _tool_calls = model.stream_and_process()
+```
+
+`Model.create()` builds the backing `Context`; pass an existing `Context` to `Model(...)` if you manage it yourself. The chat defaults live in `memorizer/chat/config.py`.
 
 ## Quick Start
 
-The package ships with a simple interactive chat interface (`src/chat/chat.py`). To launch it:
+The package ships with a simple interactive chat interface (`memorizer/chat/chat.py`). To launch it:
 
 ```bash
-python -m src.chat.chat
+memorizer-chat            # or: python -m memorizer.chat.chat
 ```
 
 This starts a REPL where you can type messages. The system automatically:
@@ -55,11 +76,12 @@ This starts a REPL where you can type messages. The system automatically:
 
 | Module | Purpose |
 |--------|---------|
-| `src/model/context.py` | Defines the `Context` data structure with fixed memory sections and timestamped rendering. |
-| `src/model/memory.py` | Message storage, persistence, and configurable uncompressed tail handling. |
-| `src/model/model.py` | Model configuration, streaming, synchronous calls, and compression helpers. |
-| `src/chat/completion.py` | Streaming completion loop used by the chat interface. |
-| `src/chat/chat.py` | Interactive command‑line interface built with `prompt_toolkit`. |
+| `memorizer/model/context.py` | Defines the `Context` data structure with fixed memory sections and timestamped rendering. |
+| `memorizer/model/memory.py` | Message storage, persistence, and configurable uncompressed tail handling. |
+| `memorizer/model/model.py` | Model configuration, streaming, synchronous calls, and compression helpers. |
+| `memorizer/chat/config.py` | Default model id, endpoint and system prompt for the chat CLI. |
+| `memorizer/chat/completion.py` | Streaming completion loop used by the chat interface. |
+| `memorizer/chat/chat.py` | Interactive command‑line interface built with `prompt_toolkit`. |
 
 ## Persisted Data
 
@@ -78,7 +100,7 @@ You can change the location by passing a custom `data_dir` to `Context.create()`
 Run the test suite with:
 
 ```bash
-pytest src
+pytest tests
 ```
 
 The tests cover context creation, message handling, and compression behaviour.

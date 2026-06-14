@@ -2,17 +2,18 @@ import json
 import time
 import asyncio
 
-from src.model.context import Context
-from src.model.model import MODEL_INFO, Model
+from . import config
+from ..model import Model
 
 
-async def stream_completion(model: Model, max_completion_tokens: int = 1500):
+async def stream_completion(model: Model, max_completion_tokens: int | None = None):
     """
     Stream LLM completion using a local OpenAI-compatible endpoint.
 
     Args:
         model: Model instance containing request config and context
-        max_completion_tokens: Maximum tokens to generate (default: 1500)
+        max_completion_tokens: Maximum tokens to generate; falls back to the
+            model's configured ``max_completion_tokens`` when None.
 
     Returns:
         dict: Usage statistics if available, None otherwise
@@ -94,15 +95,19 @@ def main() -> int:
     parser.add_argument(
         "--max-completion-tokens",
         type=int,
-        default=1500,
+        default=config.MAX_COMPLETION_TOKENS,
         help="Maximum completion tokens",
     )
     args = parser.parse_args()
 
-    ctx = Context.create(system_prompt=MODEL_INFO["system_prompt"])
-    ctx.system.set_var("MODEL_ID", MODEL_INFO["model_id"])
-    ctx.append("user", args.prompt)
-    model = Model(ctx)
+    model = Model.create(
+        model_id=config.MODEL_ID,
+        model_name=config.MODEL_NAME,
+        base_url=config.BASE_URL,
+        system_prompt=config.SYSTEM_PROMPT,
+        max_completion_tokens=args.max_completion_tokens,
+    )
+    model.context.append("user", args.prompt)
     asyncio.run(stream_completion(model, max_completion_tokens=args.max_completion_tokens))
     return 0
 

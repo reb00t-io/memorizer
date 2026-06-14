@@ -1,97 +1,258 @@
+import json
 import threading
-from typing import Iterable, cast
+from pathlib import Path
+from typing import Iterable, Optional
 
-import openai
 import requests
-from openai.types.chat import ChatCompletionMessageParam
 
 from .context import Context
 from .message import Message
 
 
-MODEL_INFO = {
-    "model_name": "gpt-oss",
-    "model_id": "gpt-oss-120b",
-    "system_prompt": (
-        "You are <MODEL_ID>, a learning agent with memory and goals running in a terminal chat app. IMPORTANT: Don't expose your WORKSPACE if not explicitly asked! "
-        "Messages contain timestamps in user time, last message has current time, don't respond with timestamps, they are added automatically! "
-        "You are concise! State your opinion!"
-    ),
-}
+def process_streaming_response(response: requests.Response) -> tuple[str, list[dict]]:
+    """Process a streaming chat completions response (SSE format).
+
+    Returns (assistant_text, tool_calls) where tool_calls are accumulated from
+    incremental delta chunks and returned in the OpenAI tool call format.
+
+    Always closes the response when done (or on error) to release the
+    underlying TCP connection back to the pool.
+    """
+    text_parts: list[str] = []
+    tool_calls_map: dict[int, dict] = {}
+
+    try:
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices")
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            if delta.get("content"):
+                text_parts.append(delta["content"])
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                if idx not in tool_calls_map:
+                    tool_calls_map[idx] = {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    }
+                if tc.get("id"):
+                    tool_calls_map[idx]["id"] = tc["id"]
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls_map[idx]["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    tool_calls_map[idx]["function"]["arguments"] += fn["arguments"]
+    finally:
+        response.close()
+
+    text = "".join(text_parts).strip()
+    tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
+    return text, tool_calls
+
+
+DEFAULT_BASE_URL = "http://[::1]:8080/v1"
 
 DEFAULT_GOAL_PLACEHOLDER = "You don't have any goal yet. You will come up with one later as YOU see fit."
 
 
 class Model:
+    """Model-managed context client for an OpenAI-compatible chat endpoint.
+
+    The endpoint, model id and completion-token budget are supplied at startup
+    so the class can be driven directly from another project without the bundled
+    chat CLI. Use :meth:`create` to build the backing :class:`Context` in one call,
+    or pass an existing context to ``__init__``.
+    """
+
     def __init__(
         self,
         context: Context,
         *,
-        base_url: str = "http://[::1]:8080/v1",
-        model_info: dict[str, str] | None = None,
+        model_id: str,
+        max_completion_tokens: int,
+        model_name: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str = "dummy",
     ) -> None:
         self.context = context
+        self.model_id = model_id
+        self.model_name = model_name or model_id
         self.base_url = base_url
-        self.model_info = model_info or MODEL_INFO
-        self.context.system.set_var("MODEL_ID", self.model_info["model_id"])
+        self.api_key = api_key
+        self.max_completion_tokens = max_completion_tokens
+        self._compression_lock = threading.Lock()
+        self.context.system.set_var("MODEL_ID", model_id)
         if not self.context.model_goal.messages():
             self.context.model_goal.append(
                 "memory",
                 DEFAULT_GOAL_PLACEHOLDER,
             )
 
-    def stream(self, *, max_completion_tokens: int = 1500) -> requests.Response:
-        reasoning_effort = self._update_workspace()
-        return self._stream_int(max_completion_tokens=max_completion_tokens, reasoning_effort=reasoning_effort)
+    @classmethod
+    def create(
+        cls,
+        *,
+        model_id: str,
+        max_completion_tokens: int,
+        system_prompt: str = "",
+        model_name: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str = "dummy",
+        data_dir: str | Path | None = None,
+        persist: bool = True,
+        persist_long_term: Optional[bool] = None,
+    ) -> "Model":
+        """Build a :class:`Context` and wrap it in a ready-to-use :class:`Model`."""
+        context = Context.create(
+            system_prompt=system_prompt,
+            data_dir=data_dir,
+            persist=persist,
+            persist_long_term=persist_long_term,
+        )
+        return cls(
+            context,
+            model_id=model_id,
+            max_completion_tokens=max_completion_tokens,
+            model_name=model_name,
+            base_url=base_url,
+            api_key=api_key,
+        )
 
-    def _stream_int(self, *, max_completion_tokens: int = 1500, reasoning_effort: str) -> requests.Response:
-        model_id = self.model_info["model_id"]
+    def stream(
+        self,
+        messages: list[dict] | None = None,
+        *,
+        tools: list[dict] | None = None,
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> requests.Response:
+        """Streaming LLM call. Returns a raw requests.Response for SSE processing.
+
+        If messages is None, uses self.context.to_messages().
+        If max_completion_tokens is None, uses self.max_completion_tokens.
+        If reasoning_effort is None, computes it via _update_workspace().
+        """
+        if max_completion_tokens is None:
+            max_completion_tokens = self.max_completion_tokens
+        if reasoning_effort is None:
+            reasoning_effort = self._update_workspace()
+        if messages is None:
+            messages = self.context.to_messages()
+        return self._stream_int(
+            messages,
+            tools=tools,
+            max_completion_tokens=max_completion_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def stream_and_process(
+        self,
+        messages: list[dict] | None = None,
+        *,
+        tools: list[dict] | None = None,
+        max_completion_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> tuple[str, list[dict]]:
+        """Stream a completion and process the SSE response in one step."""
+        response = self.stream(
+            messages,
+            tools=tools,
+            max_completion_tokens=max_completion_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+        return process_streaming_response(response)
+
+    def _stream_int(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        max_completion_tokens: int,
+        reasoning_effort: str,
+    ) -> requests.Response:
+        model_id = self.model_id
         url = f"{self.base_url}/chat/completions"
         headers = {
-            "Authorization": "Bearer dummy",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         payload = {
             "model": model_id,
             "max_completion_tokens": max_completion_tokens,
-            "messages": self.context.to_messages(),
+            "messages": messages,
             "stream_options": {"include_usage": True},
             "reasoning_effort": reasoning_effort,
             "stream": True,
         }
-
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         response = requests.post(url, headers=headers, json=payload, stream=True)
         response.raise_for_status()
         return response
 
-    def nostream(self, messages: Iterable[dict[str, str]]) -> str:
-        client = openai.OpenAI(
-            api_key="dummy",
-            base_url=self.base_url,
-        )
+    def _nostream_int(
+        self,
+        messages: Iterable[dict],
+        *,
+        tools: list[dict] | None = None,
+        max_completion_tokens: int,
+        reasoning_effort: str = "low",
+    ) -> dict:
+        """Non-streaming LLM call. Returns the raw chat completions response dict."""
+        model_id = self.model_id
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict = {
+            "model": model_id,
+            "max_completion_tokens": max_completion_tokens,
+            "messages": list(messages),
+            "reasoning_effort": reasoning_effort,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        resp = requests.post(url, headers=headers, json=payload, timeout=300)
+        resp.raise_for_status()
+        return resp.json()
 
-        resp = client.chat.completions.create(
-            model=self.model_info["model_id"],
-            messages=cast(list[ChatCompletionMessageParam], list(messages)),
-        )
-
-        choice = resp.choices[0]
-        content = getattr(choice.message, "content", None)
-        if not content:
-            return ""
-        return content
+    def nostream(self, messages: Iterable[dict]) -> str:
+        """Convenience wrapper: call nostream() and return just the text content."""
+        data = self._nostream_int(messages, max_completion_tokens=self.max_completion_tokens)
+        return (data["choices"][0]["message"].get("content") or "").strip()
 
     def append(self, role: str, content: str) -> None:
         self.context.append(role, content)
-        thread = threading.Thread(
-            target=self._compress_pending_messages,
-            daemon=True,
-        )
-        thread.start()
+        if self._compression_lock.acquire(blocking=False):
+            thread = threading.Thread(
+                target=self._compress_pending_messages,
+                daemon=True,
+            )
+            thread.start()
 
     def _compress_pending_messages(self) -> None:
-        self._compress_working_memory()
-        self._compress_long_term_memory()
+        try:
+            self._compress_working_memory()
+            self._compress_long_term_memory()
+        finally:
+            self._compression_lock.release()
 
     def _compress_working_memory(self) -> None:
         messages = self.context.working.messages()
@@ -139,7 +300,7 @@ class Model:
 
         messages = self.context.to_messages()
         messages.append({"role": "user", "content": prompt})
-        summary = self.nostream(messages).strip()
+        summary = self.nostream(messages)
         if not summary:
             return
 
@@ -181,7 +342,7 @@ class Model:
 
         base_messages = self.context.to_messages()
         base_messages.append({"role": "user", "content": prompt})
-        facts = self.nostream(base_messages).strip()
+        facts = self.nostream(base_messages)
         if not facts:
             return
 
@@ -215,7 +376,7 @@ class Model:
 
         base_messages = self.context.to_messages()
         base_messages.append({"role": "user", "content": prompt})
-        goal = self.nostream(base_messages).strip()
+        goal = self.nostream(base_messages)
         if not goal:
             return
 
@@ -249,7 +410,7 @@ class Model:
 
         base_messages = self.context.to_messages()
         base_messages.append({"role": "user", "content": prompt})
-        workspace = self.nostream(base_messages).strip()
+        workspace = self.nostream(base_messages)
         if not workspace:
             return "low"
 
@@ -273,4 +434,4 @@ class Model:
         )
         messages = self.context.to_messages()
         messages.append({"role": "user", "content": system_instruction})
-        return self.nostream(messages).strip()
+        return self.nostream(messages)

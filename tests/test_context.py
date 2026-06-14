@@ -1,6 +1,6 @@
 import pytest
 
-from src.model.context import Context
+from memorizer.model.context import Context
 
 
 def test_context_to_messages_order_and_roles() -> None:

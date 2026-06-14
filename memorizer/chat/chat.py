@@ -7,12 +7,9 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
 
-from src.chat.completion import stream_completion
-from src.model.model import MODEL_INFO, Model
-from src.model.context import Context
-
-
-DEFAULT_MAX_COMPLETION_TOKENS = 8000
+from . import config
+from .completion import stream_completion
+from ..model import Model
 
 
 def _nice_prompt() -> FormattedText:
@@ -30,7 +27,7 @@ def _history_file() -> Path:
 
 async def _chat_loop(model: Model, *, max_completion_tokens: int) -> None:
     print(
-        f"{MODEL_INFO['model_name']}. "
+        f"{model.model_name}. "
         "Ctrl-D/Ctrl-C to exit.\n"
     )
 
@@ -66,10 +63,15 @@ async def _chat_loop(model: Model, *, max_completion_tokens: int) -> None:
 
 
 def main() -> int:
-    context = Context.create(system_prompt=MODEL_INFO["system_prompt"])
-    model = Model(context)
+    model = Model.create(
+        model_id=config.MODEL_ID,
+        model_name=config.MODEL_NAME,
+        base_url=config.BASE_URL,
+        system_prompt=config.SYSTEM_PROMPT,
+        max_completion_tokens=config.MAX_COMPLETION_TOKENS,
+    )
     asyncio.run(_chat_loop(
-        model, max_completion_tokens=DEFAULT_MAX_COMPLETION_TOKENS))
+        model, max_completion_tokens=config.MAX_COMPLETION_TOKENS))
     return 0
 
 
