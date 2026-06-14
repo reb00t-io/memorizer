@@ -5,8 +5,8 @@ Library entry point. The core classes are re-exported here so consumers can:
     from memorizer import Model, Context
 
     model = Model.create(
-        model_id="gpt-oss-120b",
-        base_url="http://host:8080/v1",
+        model_id="kimi-latest",
+        base_url="http://[::1]:8080/v1",
         system_prompt="You are <MODEL_ID>.",
         max_completion_tokens=1500,
     )

@@ -47,16 +47,19 @@ Note: `openai` is **not** a dependency. Development dependencies include `pytest
 from memorizer import Model
 
 model = Model.create(
-    model_id="gpt-oss-120b",
-    base_url="http://host:8080/v1",
+    model_id="kimi-latest",
+    base_url="http://[::1]:8080/v1",
     system_prompt="You are <MODEL_ID>.",
     max_completion_tokens=1500,
+    thinking=False,
 )
 model.context.append("user", "Hello!")
 text, _tool_calls = model.stream_and_process()
 ```
 
 `Model.create()` builds the backing `Context`; pass an existing `Context` to `Model(...)` if you manage it yourself. The chat defaults live in `memorizer/chat/config.py`.
+
+The reference setup serves `kimi-latest` (Kimi K2.6) locally on `http://[::1]:8080/v1` through a [privatemode.ai](https://privatemode.ai) proxy, so requests stay local and `api_key="dummy"` is fine. Model reasoning is disabled by default (`chat_template_kwargs={"thinking": false}`) for lower latency; pass `thinking=True` (or `memorizer-chat --thinking`) to enable it. Override the endpoint/model via `base_url`/`model_id` or the `MEMORIZER_*` environment variables.
 
 ## Quick Start
 

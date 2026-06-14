@@ -1,9 +1,12 @@
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Iterable, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from .context import Context
 from .message import Message
@@ -87,6 +90,7 @@ class Model:
         model_name: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         api_key: str = "dummy",
+        thinking: bool = False,
     ) -> None:
         self.context = context
         self.model_id = model_id
@@ -94,7 +98,9 @@ class Model:
         self.base_url = base_url
         self.api_key = api_key
         self.max_completion_tokens = max_completion_tokens
+        self.thinking = thinking
         self._compression_lock = threading.Lock()
+        self._workspace_lock = threading.Lock()
         self.context.system.set_var("MODEL_ID", model_id)
         if not self.context.model_goal.messages():
             self.context.model_goal.append(
@@ -112,6 +118,7 @@ class Model:
         model_name: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         api_key: str = "dummy",
+        thinking: bool = False,
         data_dir: str | Path | None = None,
         persist: bool = True,
         persist_long_term: Optional[bool] = None,
@@ -130,6 +137,7 @@ class Model:
             model_name=model_name,
             base_url=base_url,
             api_key=api_key,
+            thinking=thinking,
         )
 
     def stream(
@@ -144,12 +152,14 @@ class Model:
 
         If messages is None, uses self.context.to_messages().
         If max_completion_tokens is None, uses self.max_completion_tokens.
-        If reasoning_effort is None, computes it via _update_workspace().
+        If reasoning_effort is None, defaults to "low" (the WORKSPACE is refreshed
+        in the background after each turn via update_workspace_async(), not on the
+        request path).
         """
         if max_completion_tokens is None:
             max_completion_tokens = self.max_completion_tokens
         if reasoning_effort is None:
-            reasoning_effort = self._update_workspace()
+            reasoning_effort = "low"
         if messages is None:
             messages = self.context.to_messages()
         return self._stream_int(
@@ -196,6 +206,7 @@ class Model:
             "messages": messages,
             "stream_options": {"include_usage": True},
             "reasoning_effort": reasoning_effort,
+            "chat_template_kwargs": {"thinking": self.thinking},
             "stream": True,
         }
         if tools:
@@ -225,6 +236,7 @@ class Model:
             "max_completion_tokens": max_completion_tokens,
             "messages": list(messages),
             "reasoning_effort": reasoning_effort,
+            "chat_template_kwargs": {"thinking": self.thinking},
         }
         if tools:
             payload["tools"] = tools
@@ -248,11 +260,33 @@ class Model:
             thread.start()
 
     def _compress_pending_messages(self) -> None:
+        # Best-effort background work: a failing endpoint must not crash the
+        # thread with a raw traceback. Log a concise warning and move on.
         try:
             self._compress_working_memory()
             self._compress_long_term_memory()
+        except Exception as exc:
+            logger.warning("Background memory compression skipped: %s", exc)
         finally:
             self._compression_lock.release()
+
+    def update_workspace_async(self) -> None:
+        """Refresh the WORKSPACE in a background thread after a completed turn.
+
+        Kept off the request path so it never adds latency to the user-facing
+        response. Call this once the assistant reply has been appended so the
+        update sees the latest model response. No-op if an update is in flight.
+        """
+        if self._workspace_lock.acquire(blocking=False):
+            threading.Thread(target=self._run_workspace_update, daemon=True).start()
+
+    def _run_workspace_update(self) -> None:
+        try:
+            self._update_workspace()
+        except Exception as exc:
+            logger.warning("Background workspace update skipped: %s", exc)
+        finally:
+            self._workspace_lock.release()
 
     def _compress_working_memory(self) -> None:
         messages = self.context.working.messages()

@@ -63,15 +63,60 @@ async def _chat_loop(model: Model, *, max_completion_tokens: int) -> None:
 
 
 def main() -> int:
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(
+        prog="memorizer-chat",
+        description="Interactive Memorizer chat REPL against an OpenAI-compatible endpoint.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("MEMORIZER_BASE_URL", config.BASE_URL),
+        help="Endpoint base URL (env: MEMORIZER_BASE_URL).",
+    )
+    parser.add_argument(
+        "--model",
+        dest="model_id",
+        default=os.environ.get("MEMORIZER_MODEL_ID", config.MODEL_ID),
+        help="Model id sent to the endpoint (env: MEMORIZER_MODEL_ID).",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=os.environ.get("MEMORIZER_MODEL_NAME", config.MODEL_NAME),
+        help="Display name shown in the banner (env: MEMORIZER_MODEL_NAME).",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("MEMORIZER_API_KEY", "dummy"),
+        help="API key; defaults to 'dummy' for local servers (env: MEMORIZER_API_KEY).",
+    )
+    parser.add_argument(
+        "--max-completion-tokens",
+        type=int,
+        default=int(os.environ.get("MEMORIZER_MAX_COMPLETION_TOKENS", config.MAX_COMPLETION_TOKENS)),
+        help="Max completion tokens per response (env: MEMORIZER_MAX_COMPLETION_TOKENS).",
+    )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        default=os.environ.get("MEMORIZER_THINKING", "").lower() in ("1", "true", "yes"),
+        help="Enable model reasoning/thinking; off by default for lower latency "
+        "(env: MEMORIZER_THINKING).",
+    )
+    args = parser.parse_args()
+
     model = Model.create(
-        model_id=config.MODEL_ID,
-        model_name=config.MODEL_NAME,
-        base_url=config.BASE_URL,
+        model_id=args.model_id,
+        model_name=args.model_name,
+        base_url=args.base_url,
+        api_key=args.api_key,
         system_prompt=config.SYSTEM_PROMPT,
-        max_completion_tokens=config.MAX_COMPLETION_TOKENS,
+        max_completion_tokens=args.max_completion_tokens,
+        thinking=args.thinking,
     )
     asyncio.run(_chat_loop(
-        model, max_completion_tokens=config.MAX_COMPLETION_TOKENS))
+        model, max_completion_tokens=args.max_completion_tokens))
     return 0
 
 

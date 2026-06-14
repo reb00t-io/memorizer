@@ -17,12 +17,16 @@ class _FakeModel:
     def __init__(self, response: _FakeResponse) -> None:
         self._response = response
         self.append_calls: list[tuple[str, str]] = []
+        self.workspace_updates = 0
 
     def stream(self, *, max_completion_tokens: int = 1500):
         return self._response
 
     def append(self, role: str, content: str) -> None:
         self.append_calls.append((role, content))
+
+    def update_workspace_async(self) -> None:
+        self.workspace_updates += 1
 
 
 def test_stream_completion_parses_chunks_and_appends_assistant_message() -> None:
@@ -38,3 +42,5 @@ def test_stream_completion_parses_chunks_and_appends_assistant_message() -> None
 
     assert usage == {"completion_tokens": 2}
     assert model.append_calls == [("assistant", "Hello world")]
+    # Workspace is refreshed once, after the turn completes.
+    assert model.workspace_updates == 1

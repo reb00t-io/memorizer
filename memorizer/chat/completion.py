@@ -74,6 +74,9 @@ async def stream_completion(model: Model, max_completion_tokens: int | None = No
         assistant_text = "".join(assistant_text_parts).strip()
         if assistant_text:
             model.append("assistant", assistant_text)
+            # Refresh the WORKSPACE in the background now that the turn (incl. the
+            # model response) is complete — keeps it off the request path.
+            model.update_workspace_async()
 
         return usage
 
