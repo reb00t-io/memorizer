@@ -16,7 +16,7 @@ try:  # optional: the retrieval store requires the `store` extra (qdrant-client)
     from ..store import MemoryStore, RECALL_TOOL, execute_recall
     from ..store.embedder import PrivatemodeEmbedder
     from ..store.qdrant_store import build_stores
-    from ..org import load_org_profile
+    from ..org import load_org_profile, OrgPolicy
     _STORE_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised only without the extra installed
     MemoryStore = None  # type: ignore[assignment,misc]
@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover - exercised only without the extra install
     PrivatemodeEmbedder = None  # type: ignore[assignment,misc]
     build_stores = None  # type: ignore[assignment]
     load_org_profile = None  # type: ignore[assignment]
+    OrgPolicy = None  # type: ignore[assignment,misc]
     _STORE_AVAILABLE = False
 
 ORG_DEDUPE_JACCARD = 0.8
@@ -112,6 +113,9 @@ class Model:
         memory: "MemoryStore | None" = None,
         org_memory: "MemoryStore | None" = None,
         org_profile: str | None = None,
+        org_policy: "OrgPolicy | None" = None,
+        member_id: str | None = None,
+        role: str | None = None,
         recall_limit: int = 5,
         recall_max_rounds: int = 4,
     ) -> None:
@@ -125,6 +129,9 @@ class Model:
         self.memory = memory
         self.org_memory = org_memory
         self.org_profile = org_profile
+        self.org_policy = org_policy
+        self.member_id = member_id
+        self.role = role
         self.recall_limit = recall_limit
         self.recall_max_rounds = recall_max_rounds
         self._compression_lock = threading.Lock()
@@ -157,6 +164,10 @@ class Model:
         enable_memory: bool = False,
         enable_org: bool = False,
         org_profile: str | Path | None = None,
+        org_roles: "set[str] | list[str] | None" = None,
+        org_writer_roles: "set[str] | list[str] | None" = None,
+        member_id: str | None = None,
+        role: str | None = None,
         embedding_model: str = "qwen3-embedding-4b",
         embedding_dimensions: int = 1024,
         qdrant_location: str | None = None,
@@ -178,6 +189,7 @@ class Model:
         memory = None
         org_memory = None
         profile_text = None
+        org_policy = None
         if enable_memory or enable_org:
             if not _STORE_AVAILABLE:
                 raise RuntimeError(
@@ -202,6 +214,9 @@ class Model:
             )
             if enable_org:
                 profile_text = load_org_profile(org_profile)
+                org_policy = OrgPolicy.create(
+                    roles=org_roles, writer_roles=org_writer_roles
+                )
 
         return cls(
             context,
@@ -214,6 +229,9 @@ class Model:
             memory=memory,
             org_memory=org_memory,
             org_profile=profile_text,
+            org_policy=org_policy,
+            member_id=member_id,
+            role=role,
         )
 
     def stream(
@@ -349,6 +367,8 @@ class Model:
                     args,
                     agent_store=self.memory,
                     org_store=self.org_memory,
+                    member_id=self.member_id,
+                    role=self.role,
                     default_limit=self.recall_limit,
                 )
             else:
@@ -486,9 +506,12 @@ class Model:
                     f"{m.formatted_timestamp or 'unknown'}\n{m.role}: {m.content}"
                     for m in to_compress
                 )
-                raw_id = self.memory.add(raw_text, kind="raw", timestamp=end_time)
+                raw_id = self.memory.add(
+                    raw_text, kind="raw", timestamp=end_time, member_id=self.member_id
+                )
                 summary_id = self.memory.add(
-                    summary, kind="episode", timestamp=end_time, source_ids=[raw_id]
+                    summary, kind="episode", timestamp=end_time,
+                    source_ids=[raw_id], member_id=self.member_id,
                 )
                 prefix = f"[{summary_id}] {prefix}"
             except Exception as exc:
@@ -629,17 +652,30 @@ class Model:
         """Extract generic, org-wide facts from a batch and add new ones to org memory.
 
         Governed by ``self.org_profile`` (the org description + extraction rules).
-        The model is shown current org knowledge and asked for only NEW, generic,
-        non-overlapping items; a token-overlap guard drops near-duplicates as a
-        backstop so org memory stays small and has limited overlap with personal
-        memory.
+        Write access is gated by role: only members whose role may write org memory
+        promote facts. Each fact is stored with a ``visible_to`` role list so read
+        visibility is enforced at recall time. A token-overlap guard drops
+        near-duplicates so org memory stays small.
         """
         if self.org_memory is None or not self.org_profile:
             return
+        # Write gate: only allowed roles may promote facts into org memory.
+        if self.org_policy is not None and not self.org_policy.can_write(self.role):
+            return
 
         history = "\n".join(f"{m.role}: {m.content}" for m in messages)
+        # The promoter sees all org facts they could possibly duplicate, regardless
+        # of per-fact visibility, so dedupe stays correct.
         existing = self.org_memory.all_units(kind="org_fact", limit=200)
         existing_block = "\n".join(f"- {u.text}" for u in existing) or "(none yet)"
+
+        roles_line = ""
+        if self.org_policy and self.org_policy.roles:
+            roles_line = (
+                "Known roles: " + ", ".join(sorted(self.org_policy.roles)) + ". "
+                "For each fact set \"visible_to\" to the roles that should see it, "
+                "or \"all\" if everyone may see it. "
+            )
 
         instruction = (
             f"{self.org_profile}\n\n"
@@ -647,7 +683,9 @@ class Model:
             "already stored. Following the extraction rules above, output ONLY new, "
             "generic, organization-wide facts that are NOT already covered and are "
             "NOT specific to one user or conversation. "
-            "Respond with a JSON array of short standalone strings (one fact each). "
+            f"{roles_line}"
+            "Respond with a JSON array of objects: "
+            '{"fact": "<short standalone fact>", "visible_to": "all" or ["role", ...]}. '
             "If nothing qualifies, respond with []."
         )
         prompt = (
@@ -661,12 +699,16 @@ class Model:
 
         existing_texts = [u.text for u in existing]
         added = 0
-        for fact in _parse_json_string_list(raw):
+        for fact, visible_to in _parse_org_items(raw):
             fact = fact.strip()
             if not fact or _is_near_duplicate(fact, existing_texts):
                 continue
+            if self.org_policy is not None:
+                visible_to = self.org_policy.normalize_visibility(visible_to)
             try:
-                self.org_memory.add(fact, kind="org_fact")
+                self.org_memory.add(
+                    fact, kind="org_fact", member_id=self.member_id, visible_to=visible_to
+                )
             except Exception as exc:
                 logger.warning("Org memory store write skipped: %s", exc)
                 continue
@@ -677,11 +719,11 @@ class Model:
             self._refresh_org_block()
 
     def _refresh_org_block(self) -> None:
-        """Rebuild the in-context org block from the shared org store."""
+        """Rebuild the in-context org block from the org facts visible to this member."""
         if self.org_memory is None:
             return
         try:
-            units = self.org_memory.all_units(kind="org_fact", limit=200)
+            units = self.org_memory.all_units(kind="org_fact", limit=200, role=self.role)
         except Exception as exc:
             logger.warning("Org block refresh skipped: %s", exc)
             return
@@ -689,8 +731,8 @@ class Model:
         self.context.set_org_block(block)
 
 
-def _parse_json_string_list(raw: str) -> list[str]:
-    """Best-effort parse of a JSON array of strings from a model response."""
+def _parse_json_array(raw: str) -> list:
+    """Best-effort extraction of a JSON array from a (possibly fenced) response."""
     if not raw:
         return []
     text = raw.strip()
@@ -705,7 +747,26 @@ def _parse_json_string_list(raw: str) -> list[str]:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return []
-    return [str(item) for item in data if isinstance(item, (str, int, float)) and str(item).strip()]
+    return data if isinstance(data, list) else []
+
+
+def _parse_org_items(raw: str) -> list[tuple[str, object]]:
+    """Parse extraction output into (fact, visible_to) pairs.
+
+    Accepts either bare strings (visible to everyone) or objects of the form
+    ``{"fact": "...", "visible_to": "all" | ["role", ...]}``.
+    """
+    items: list[tuple[str, object]] = []
+    for entry in _parse_json_array(raw):
+        if isinstance(entry, str):
+            if entry.strip():
+                items.append((entry, None))
+        elif isinstance(entry, dict):
+            fact = entry.get("fact") or entry.get("text") or ""
+            if str(fact).strip():
+                visible = entry.get("visible_to", entry.get("roles", entry.get("audience")))
+                items.append((str(fact), visible))
+    return items
 
 
 def _is_near_duplicate(fact: str, existing: list[str]) -> bool:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 import warnings
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from .embedder import Embedder
 logger = logging.getLogger(__name__)
 
 _UUID_NS = uuid.NAMESPACE_URL
+EVERYONE = "*"
 
 
 @dataclass(slots=True)
@@ -40,6 +42,8 @@ class MemoryHit:
     text: str
     timestamp: Optional[str] = None
     source_ids: list[str] = field(default_factory=list)
+    member_id: Optional[str] = None
+    visible_to: list[str] = field(default_factory=lambda: [EVERYONE])
     score: Optional[float] = None
 
     def render(self) -> str:
@@ -75,6 +79,10 @@ class MemoryStore:
         self.bm25 = bm25 or BM25Encoder()
         self._state_dir = Path(state_dir).expanduser() if state_dir is not None else None
         self._next = 1
+        # Serializes writes so several members can safely share one embedded
+        # (on-disk) store in a single process: guards the id counter, the BM25
+        # vocab, the upsert and the state file.
+        self._write_lock = threading.Lock()
 
         if self._state_dir is not None:
             self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -128,7 +136,7 @@ class MemoryStore:
                 "bm25": models.SparseVectorParams(modifier=models.Modifier.IDF),
             },
         )
-        for field_name in ("short_id", "scope", "kind"):
+        for field_name in ("short_id", "scope", "kind", "member_id", "visible_to"):
             # Payload indexes are a no-op (and warn) in local mode; they matter
             # only for a real server, so suppress the local warning.
             with warnings.catch_warnings():
@@ -182,40 +190,87 @@ class MemoryStore:
         timestamp: Optional[str] = None,
         source_ids: Optional[list[str]] = None,
         short_id: Optional[str] = None,
+        member_id: Optional[str] = None,
+        visible_to: Optional[list[str]] = None,
     ) -> str:
-        """Embed and upsert one unit. Returns its short id."""
+        """Embed and upsert one unit. Returns its short id.
+
+        ``member_id`` records the owner (used to scope personal/agent recall);
+        ``visible_to`` is the list of roles allowed to read the unit (defaults to
+        everyone via ``"*"``). The embedding call runs outside the write lock; the
+        id allocation, BM25 vocab update, upsert and state write run inside it.
+        """
         text = text.strip()
-        sid = short_id or self._alloc_id()
         dense = self.embedder.embed_documents([text])[0]
-        indices, values = self.bm25.encode_document(text)
 
-        vector: dict[str, object] = {"dense": dense}
-        if indices:
-            vector["bm25"] = models.SparseVector(indices=indices, values=values)
+        with self._write_lock:
+            sid = short_id or self._alloc_id()
+            indices, values = self.bm25.encode_document(text)
 
-        payload = {
-            "short_id": sid,
-            "scope": self.scope,
-            "kind": kind,
-            "text": text,
-            "timestamp": timestamp,
-            "source_ids": source_ids or [],
-        }
-        self.client.upsert(
-            collection_name=self.collection,
-            points=[models.PointStruct(id=self._point_id(sid), vector=vector, payload=payload)],
-        )
-        self._save_state()
+            vector: dict[str, object] = {"dense": dense}
+            if indices:
+                vector["bm25"] = models.SparseVector(indices=indices, values=values)
+
+            payload = {
+                "short_id": sid,
+                "scope": self.scope,
+                "kind": kind,
+                "text": text,
+                "timestamp": timestamp,
+                "source_ids": source_ids or [],
+                "member_id": member_id,
+                "visible_to": list(visible_to) if visible_to else [EVERYONE],
+            }
+            self.client.upsert(
+                collection_name=self.collection,
+                points=[models.PointStruct(id=self._point_id(sid), vector=vector, payload=payload)],
+            )
+            self._save_state()
         return sid
+
+    @staticmethod
+    def _access_conditions(
+        *,
+        member_id: Optional[str],
+        role: Optional[str],
+        kinds: Optional[list[str]],
+    ) -> list[models.FieldCondition]:
+        """Build payload conditions enforcing kind + ownership + role visibility."""
+        conditions: list[models.FieldCondition] = []
+        if kinds:
+            conditions.append(
+                models.FieldCondition(key="kind", match=models.MatchAny(any=list(kinds)))
+            )
+        if member_id is not None:
+            conditions.append(
+                models.FieldCondition(key="member_id", match=models.MatchValue(value=member_id))
+            )
+        if role is not None:
+            # Visible to this role, or to everyone.
+            conditions.append(
+                models.FieldCondition(key="visible_to", match=models.MatchAny(any=[role, EVERYONE]))
+            )
+        return conditions
 
     # -- reads --------------------------------------------------------------
 
-    def get(self, short_id: str) -> Optional[MemoryHit]:
+    def get(
+        self,
+        short_id: str,
+        *,
+        member_id: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> Optional[MemoryHit]:
+        """Fetch a unit by id, enforcing ownership / role visibility.
+
+        Returns None if the unit does not exist *or* the caller may not see it, so
+        guessing an id can't leak another member's or a restricted unit.
+        """
+        must = [models.FieldCondition(key="short_id", match=models.MatchValue(value=short_id))]
+        must.extend(self._access_conditions(member_id=member_id, role=role, kinds=None))
         points, _ = self.client.scroll(
             collection_name=self.collection,
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(key="short_id", match=models.MatchValue(value=short_id))]
-            ),
+            scroll_filter=models.Filter(must=must),
             limit=1,
             with_payload=True,
         )
@@ -223,16 +278,21 @@ class MemoryStore:
             return None
         return self._to_hit(points[0].payload, score=None)
 
-    def search(self, query: str, *, limit: int = 5, kinds: Optional[list[str]] = None) -> list[MemoryHit]:
-        """Hybrid (dense + BM25, RRF-fused) search over this store."""
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        kinds: Optional[list[str]] = None,
+        member_id: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> list[MemoryHit]:
+        """Hybrid (dense + BM25, RRF-fused) search, scoped by member / role."""
         query = query.strip()
         if not query:
             return []
-        query_filter = None
-        if kinds:
-            query_filter = models.Filter(
-                must=[models.FieldCondition(key="kind", match=models.MatchAny(any=list(kinds)))]
-            )
+        conditions = self._access_conditions(member_id=member_id, role=role, kinds=kinds)
+        query_filter = models.Filter(must=conditions) if conditions else None
 
         dense = self.embedder.embed_query(query)
         indices, values = self.bm25.encode_query(query)
@@ -258,13 +318,19 @@ class MemoryStore:
         ).points
         return [self._to_hit(p.payload, score=p.score) for p in points]
 
-    def all_units(self, *, kind: Optional[str] = None, limit: int = 1000) -> list[MemoryHit]:
-        """Scroll every unit (optionally of one kind), ordered by short-id number."""
-        query_filter = None
-        if kind:
-            query_filter = models.Filter(
-                must=[models.FieldCondition(key="kind", match=models.MatchValue(value=kind))]
-            )
+    def all_units(
+        self,
+        *,
+        kind: Optional[str] = None,
+        limit: int = 1000,
+        member_id: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> list[MemoryHit]:
+        """Scroll every visible unit (optionally one kind), ordered by short-id number."""
+        conditions = self._access_conditions(
+            member_id=member_id, role=role, kinds=[kind] if kind else None
+        )
+        query_filter = models.Filter(must=conditions) if conditions else None
         points, _ = self.client.scroll(
             collection_name=self.collection,
             scroll_filter=query_filter,
@@ -294,6 +360,8 @@ class MemoryStore:
             text=payload.get("text", ""),
             timestamp=payload.get("timestamp"),
             source_ids=list(payload.get("source_ids") or []),
+            member_id=payload.get("member_id"),
+            visible_to=list(payload.get("visible_to") or [EVERYONE]),
             score=score,
         )
 

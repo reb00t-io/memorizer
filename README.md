@@ -106,8 +106,14 @@ answer = model.generate(messages=[{"role": "user", "content": "What's our deploy
 - **Embeddings**: `qwen3-embedding-4b` via the same Privatemode endpoint (no extra service).
 - **Org memory**: an extraction step (governed by `org_profile`) promotes only generic,
   org-wide facts into a shared store, rendered first as a cacheable prefix.
+- **Members and roles**: pass `member_id` to scope personal memory per member, and `role`
+  with an `OrgPolicy` (`org_roles` / `org_writer_roles`) so roles gate org memory both
+  ways — only writer roles promote facts, and each fact's `visible_to` controls who can
+  read it. One memorizer process can serve many members against one backend (a Qdrant
+  **server** is only needed to share the store across multiple processes).
 
-In the chat CLI: `memorizer-chat --memory` (and `--org`, `--org-profile`, `--qdrant-url`).
+In the chat CLI: `memorizer-chat --memory` (and `--org`, `--org-profile`, `--qdrant-url`,
+`--member-id`, `--role`, `--org-roles`, `--org-writer-roles`).
 
 Reranking is intentionally not wired up yet (no reranker available).
 

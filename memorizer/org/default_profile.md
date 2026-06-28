@@ -38,3 +38,20 @@ Examples to extract:
 - Anything you are not confident is true and organization-wide.
 
 When in doubt, leave it out — it stays in the agent's personal memory instead.
+
+## Roles and visibility
+
+Members have roles (configured by the deployment). Roles gate org memory two ways:
+
+- **Write**: only certain roles may promote facts into org memory. A member whose
+  role lacks write access contributes nothing to org memory.
+- **Read**: each org fact records which roles may see it. Most facts are visible to
+  everyone (`"all"`); restrict a fact only when the rules above call for it.
+
+When extracting, set each fact's `visible_to` to the roles that should see it, or
+`"all"` if everyone may. Example: an HR-only policy → `["manager", "admin"]`; a
+general engineering convention → `"all"`. Default to `"all"` unless a fact is
+clearly sensitive to a subset of roles. Replace the example roles below with your
+organization's real roles.
+
+- Example roles: `engineer`, `manager`, `admin`.

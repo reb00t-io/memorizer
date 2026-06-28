@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .roles import EVERYONE, OrgPolicy
+
 _DEFAULT_PATH = Path(__file__).with_name("default_profile.md")
 
 
@@ -31,4 +33,4 @@ def load_org_profile(profile: str | Path | None) -> str:
     return profile
 
 
-__all__ = ["load_org_profile"]
+__all__ = ["load_org_profile", "OrgPolicy", "EVERYONE"]

@@ -127,7 +127,32 @@ def main() -> int:
         default=os.environ.get("MEMORIZER_QDRANT_URL"),
         help="Qdrant server URL; omit for a local on-disk store (env: MEMORIZER_QDRANT_URL).",
     )
+    parser.add_argument(
+        "--member-id",
+        default=os.environ.get("MEMORIZER_MEMBER_ID"),
+        help="Member id; scopes personal memory to this member (env: MEMORIZER_MEMBER_ID).",
+    )
+    parser.add_argument(
+        "--role",
+        default=os.environ.get("MEMORIZER_ROLE"),
+        help="Member role; gates org memory read visibility / write access (env: MEMORIZER_ROLE).",
+    )
+    parser.add_argument(
+        "--org-roles",
+        default=os.environ.get("MEMORIZER_ORG_ROLES"),
+        help="Comma-separated list of all known org roles (env: MEMORIZER_ORG_ROLES).",
+    )
+    parser.add_argument(
+        "--org-writer-roles",
+        default=os.environ.get("MEMORIZER_ORG_WRITER_ROLES"),
+        help="Comma-separated roles allowed to write org memory (env: MEMORIZER_ORG_WRITER_ROLES).",
+    )
     args = parser.parse_args()
+
+    def _csv(value: str | None) -> list[str] | None:
+        if not value:
+            return None
+        return [v.strip() for v in value.split(",") if v.strip()]
 
     model = Model.create(
         model_id=args.model_id,
@@ -140,6 +165,10 @@ def main() -> int:
         enable_memory=args.memory or args.org,
         enable_org=args.org,
         org_profile=args.org_profile,
+        org_roles=_csv(args.org_roles),
+        org_writer_roles=_csv(args.org_writer_roles),
+        member_id=args.member_id,
+        role=args.role,
         qdrant_location=args.qdrant_url,
     )
     asyncio.run(_chat_loop(

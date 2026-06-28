@@ -48,16 +48,21 @@ def execute_recall(
     *,
     agent_store: Optional[MemoryStore],
     org_store: Optional[MemoryStore] = None,
+    member_id: Optional[str] = None,
+    role: Optional[str] = None,
     default_limit: int = 5,
 ) -> str:
-    """Run a recall tool call against the agent (and optionally org) store."""
-    stores = [s for s in (agent_store, org_store) if s is not None]
-    if not stores:
+    """Run a recall tool call, scoped to the caller's member id and role.
+
+    Agent (personal) memory is restricted to ``member_id``; org memory is
+    filtered to facts visible to ``role`` (or to everyone).
+    """
+    if agent_store is None and org_store is None:
         return "Memory is not available."
 
     raw_id = (args.get("id") or "").strip()
     if raw_id:
-        return _fetch_by_id(raw_id, stores)
+        return _fetch_by_id(raw_id, agent_store, org_store, member_id, role)
 
     query = (args.get("query") or "").strip()
     if not query:
@@ -65,8 +70,10 @@ def execute_recall(
 
     limit = int(args.get("limit") or default_limit)
     hits: list[MemoryHit] = []
-    for store in stores:
-        hits.extend(store.search(query, limit=limit))
+    if agent_store is not None:
+        hits.extend(agent_store.search(query, limit=limit, member_id=member_id))
+    if org_store is not None:
+        hits.extend(org_store.search(query, limit=limit, role=role))
     if not hits:
         return f"No memories found for {query!r}."
     # Best-scoring first across stores; keep it short.
@@ -75,14 +82,26 @@ def execute_recall(
     return f"Found {min(len(hits), limit)} memory result(s):\n\n{rendered}"
 
 
-def _fetch_by_id(short_id: str, stores: list[MemoryStore]) -> str:
-    for store in stores:
-        hit = store.get(short_id)
+def _fetch_by_id(
+    short_id: str,
+    agent_store: Optional[MemoryStore],
+    org_store: Optional[MemoryStore],
+    member_id: Optional[str],
+    role: Optional[str],
+) -> str:
+    candidates = [
+        (agent_store, {"member_id": member_id}),
+        (org_store, {"role": role}),
+    ]
+    for store, access in candidates:
+        if store is None:
+            continue
+        hit = store.get(short_id, **access)
         if hit is None:
             continue
         parts = [hit.render()]
         for src_id in hit.source_ids:
-            src = store.get(src_id)
+            src = store.get(src_id, **access)
             if src is not None:
                 parts.append("\nOriginal detail:\n" + src.render())
         return "\n".join(parts)
