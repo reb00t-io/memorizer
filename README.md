@@ -19,6 +19,13 @@ optional `chat` extra (`prompt-toolkit`):
 pip install "memorizer[chat] @ git+https://github.com/reb00t-io/memorizer.git"
 ```
 
+Retrieval-backed recall (Qdrant hybrid search + the `recall` tool, plus shared
+organization memory) needs the optional `store` extra (`qdrant-client`):
+
+```bash
+pip install "memorizer[store] @ git+https://github.com/reb00t-io/memorizer.git"
+```
+
 ## Use as a library
 
 The `Model` class can be driven directly from another project — the endpoint,
@@ -69,10 +76,46 @@ memorizer-chat                         # kimi-latest on http://[::1]:8080/v1
 memorizer-chat --base-url http://host:8080/v1 --model kimi-latest --thinking
 ```
 
+## Retrieval-backed recall + organization memory
+
+With the `store` extra, Memorizer keeps a Qdrant-backed memory the model can
+search on demand and shares generic knowledge across an organization. See
+[`VISION.md`](VISION.md) for the design.
+
+```python
+from memorizer import Model
+
+model = Model.create(
+    model_id="kimi-latest",
+    base_url="http://[::1]:8080/v1",
+    system_prompt="You are <MODEL_ID>.",
+    max_completion_tokens=1500,
+    enable_memory=True,        # Qdrant agent memory + the `recall` tool
+    enable_org=True,           # shared org memory governed by an extraction-rules doc
+    # org_profile="path/to/org_profile.md",  # defaults to the shipped template
+    # qdrant_location="http://localhost:6333",  # omit for a local on-disk store
+)
+
+answer = model.generate(messages=[{"role": "user", "content": "What's our deploy policy?"}])
+```
+
+- **Short ids**: consolidated memories get tiny ids like `m12` / `o3`, shown inline
+  in context (e.g. `[m12] …`), so the model reliably references them.
+- **`recall` tool**: `recall(query=…)` does hybrid (dense + BM25) search; `recall(id="m12")`
+  fetches a memory and follows its provenance pointer back to the original detail.
+- **Embeddings**: `qwen3-embedding-4b` via the same Privatemode endpoint (no extra service).
+- **Org memory**: an extraction step (governed by `org_profile`) promotes only generic,
+  org-wide facts into a shared store, rendered first as a cacheable prefix.
+
+In the chat CLI: `memorizer-chat --memory` (and `--org`, `--org-profile`, `--qdrant-url`).
+
+Reranking is intentionally not wired up yet (no reranker available).
+
 ## Core Concepts
-- **Fixed context layout**: system, long‑term, short‑term, recall (optional), working.
+- **Fixed context layout**: organization, system, long‑term, short‑term, recall (optional), working.
 - **Context class** (`memorizer/model/context.py`): manages memory sections, appends messages, compresses short‑term + working into long‑term.
 - **Compression** uses a summarisation LLM to create concise long‑term updates.
+- **Store** (`memorizer/store/`): Qdrant hybrid search, Privatemode embeddings, the `recall` tool.
 
 ## Documentation
 - Detailed project description: `CLAUDE.md`

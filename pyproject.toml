@@ -19,8 +19,12 @@ dependencies = [
 chat = [
   "prompt-toolkit>=3.0",
 ]
+store = [
+  "qdrant-client>=1.12",
+]
 dev = [
   "pytest>=8.2",
+  "qdrant-client>=1.12",
 ]
 
 [project.scripts]
@@ -29,3 +33,6 @@ memorizer-chat = "memorizer.chat.chat:main"
 [tool.setuptools.packages.find]
 include = ["memorizer*"]
 exclude = ["tests*", "docs*"]
+
+[tool.setuptools.package-data]
+"memorizer.org" = ["*.md"]

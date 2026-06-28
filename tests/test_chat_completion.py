@@ -13,14 +13,27 @@ class _FakeResponse:
             yield line.encode("utf-8")
 
 
+class _FakeContext:
+    def to_messages(self):
+        return []
+
+
 class _FakeModel:
     def __init__(self, response: _FakeResponse) -> None:
         self._response = response
         self.append_calls: list[tuple[str, str]] = []
         self.workspace_updates = 0
+        self.context = _FakeContext()
+        self.recall_max_rounds = 4
 
-    def stream(self, *, max_completion_tokens: int = 1500):
+    def recall_tools(self):
+        return None
+
+    def stream(self, messages=None, *, tools=None, max_completion_tokens: int = 1500):
         return self._response
+
+    def execute_tool_calls(self, tool_calls):
+        return []
 
     def append(self, role: str, content: str) -> None:
         self.append_calls.append((role, content))

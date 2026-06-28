@@ -6,9 +6,66 @@ from . import config
 from ..model import Model
 
 
+def _consume_stream(response) -> tuple[str, list[dict], dict | None]:
+    """Print a streamed SSE response and return (text, tool_calls, usage)."""
+    text_parts: list[str] = []
+    tool_calls_map: dict[int, dict] = {}
+    usage = None
+    reasoning = False
+
+    for raw in response.iter_lines():
+        if not raw:
+            continue
+        line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        if not line.startswith("data: "):
+            continue
+        data = line[6:]
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {})
+
+        if delta.get("content"):
+            if reasoning:
+                reasoning = False
+                print("\033[0m\n")
+            text_parts.append(delta["content"])
+            print(delta["content"], end="", flush=True)
+
+        if delta.get("reasoning_content"):
+            if not reasoning:
+                print("\033[34m")
+                reasoning = True
+            print(delta["reasoning_content"], end="", flush=True)
+
+        for tc in delta.get("tool_calls") or []:
+            idx = tc.get("index", 0)
+            slot = tool_calls_map.setdefault(
+                idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+            )
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function", {})
+            if fn.get("name"):
+                slot["function"]["name"] += fn["name"]
+            if fn.get("arguments"):
+                slot["function"]["arguments"] += fn["arguments"]
+
+    print("\033[0m", end="", flush=True)
+    text = "".join(text_parts).strip()
+    tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map)]
+    return text, tool_calls, usage
+
+
 async def stream_completion(model: Model, max_completion_tokens: int | None = None):
     """
-    Stream LLM completion using a local OpenAI-compatible endpoint.
+    Stream an LLM completion, resolving ``recall`` tool calls in a loop.
 
     Args:
         model: Model instance containing request config and context
@@ -20,58 +77,32 @@ async def stream_completion(model: Model, max_completion_tokens: int | None = No
     """
     t_start = time.time()
     usage = None
-    assistant_text_parts: list[str] = []
+    tools = model.recall_tools()
+    messages = model.context.to_messages()
 
     try:
-        response = model.stream(max_completion_tokens=max_completion_tokens)
+        assistant_text = ""
+        for _ in range(max(1, model.recall_max_rounds)):
+            response = model.stream(
+                messages, tools=tools, max_completion_tokens=max_completion_tokens
+            )
+            assistant_text, tool_calls, turn_usage = _consume_stream(response)
+            usage = turn_usage or usage
+            if not tool_calls:
+                break
+            # Tool round: record the call + results, then let the model continue.
+            print(f"\n\033[90m[recall: {len(tool_calls)} call(s)]\033[0m", flush=True)
+            messages.append(
+                {"role": "assistant", "content": assistant_text, "tool_calls": tool_calls}
+            )
+            messages.extend(model.execute_tool_calls(tool_calls))
 
-        # Stream and process response
-        reasoning = False
-
-        for line in response.iter_lines():
-            if line:
-                line = line.decode('utf-8')
-                if line.startswith('data: '):
-                    data = line[6:]
-                    if data == '[DONE]':
-                        break
-                    chunk = json.loads(data)
-
-                    if chunk.get('usage'):
-                        usage = chunk['usage']
-                    if chunk.get('choices') and len(chunk['choices']) > 0:
-                        delta = chunk['choices'][0]['delta']
-                        content = None
-
-                        # Assistant visible text
-                        if 'content' in delta and delta['content']:
-                            if reasoning:
-                                reasoning = False
-                                print("\033[0m\n")
-                            content = delta['content']
-                            assistant_text_parts.append(content)
-
-                        # Reasoning tokens (don't rely on model_extra)
-                        if 'reasoning_content' in delta and delta['reasoning_content']:
-                            if not reasoning:
-                                print("\033[34m")
-                                reasoning = True
-                            content = delta['reasoning_content']
-
-                        if content:
-                            print(content, end="", flush=True)
-
-        print("\033[0m", end="", flush=True)
-
-        # Calculate and display statistics
         t = time.time() - t_start
         print("\n\n")
         if usage:
-            token_count = usage.get('completion_tokens', 0)
-            tpot = t / token_count if token_count > 0 else 0
-            #print(f"n={token_count}, t={t:.2f}s, tpot={tpot * 1000:.2f}ms")
+            token_count = usage.get("completion_tokens", 0)
+            _tpot = t / token_count if token_count > 0 else 0
 
-        assistant_text = "".join(assistant_text_parts).strip()
         if assistant_text:
             model.append("assistant", assistant_text)
             # Refresh the WORKSPACE in the background now that the turn (incl. the

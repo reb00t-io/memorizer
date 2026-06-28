@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import Iterable, Optional
@@ -10,6 +11,23 @@ logger = logging.getLogger(__name__)
 
 from .context import Context
 from .message import Message
+
+try:  # optional: the retrieval store requires the `store` extra (qdrant-client)
+    from ..store import MemoryStore, RECALL_TOOL, execute_recall
+    from ..store.embedder import PrivatemodeEmbedder
+    from ..store.qdrant_store import build_stores
+    from ..org import load_org_profile
+    _STORE_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised only without the extra installed
+    MemoryStore = None  # type: ignore[assignment,misc]
+    RECALL_TOOL = None  # type: ignore[assignment]
+    execute_recall = None  # type: ignore[assignment]
+    PrivatemodeEmbedder = None  # type: ignore[assignment,misc]
+    build_stores = None  # type: ignore[assignment]
+    load_org_profile = None  # type: ignore[assignment]
+    _STORE_AVAILABLE = False
+
+ORG_DEDUPE_JACCARD = 0.8
 
 
 def process_streaming_response(response: requests.Response) -> tuple[str, list[dict]]:
@@ -91,6 +109,11 @@ class Model:
         base_url: str = DEFAULT_BASE_URL,
         api_key: str = "dummy",
         thinking: bool = False,
+        memory: "MemoryStore | None" = None,
+        org_memory: "MemoryStore | None" = None,
+        org_profile: str | None = None,
+        recall_limit: int = 5,
+        recall_max_rounds: int = 4,
     ) -> None:
         self.context = context
         self.model_id = model_id
@@ -99,6 +122,11 @@ class Model:
         self.api_key = api_key
         self.max_completion_tokens = max_completion_tokens
         self.thinking = thinking
+        self.memory = memory
+        self.org_memory = org_memory
+        self.org_profile = org_profile
+        self.recall_limit = recall_limit
+        self.recall_max_rounds = recall_max_rounds
         self._compression_lock = threading.Lock()
         self._workspace_lock = threading.Lock()
         self.context.system.set_var("MODEL_ID", model_id)
@@ -107,6 +135,10 @@ class Model:
                 "memory",
                 DEFAULT_GOAL_PLACEHOLDER,
             )
+        # Rebuild the in-context org block from the shared store on startup so a
+        # fresh process reflects org knowledge persisted by any agent.
+        if self.org_memory is not None:
+            self._refresh_org_block()
 
     @classmethod
     def create(
@@ -122,14 +154,55 @@ class Model:
         data_dir: str | Path | None = None,
         persist: bool = True,
         persist_long_term: Optional[bool] = None,
+        enable_memory: bool = False,
+        enable_org: bool = False,
+        org_profile: str | Path | None = None,
+        embedding_model: str = "qwen3-embedding-4b",
+        embedding_dimensions: int = 1024,
+        qdrant_location: str | None = None,
     ) -> "Model":
-        """Build a :class:`Context` and wrap it in a ready-to-use :class:`Model`."""
+        """Build a :class:`Context` and wrap it in a ready-to-use :class:`Model`.
+
+        Set ``enable_memory`` to attach a Qdrant-backed agent memory + ``recall``
+        tool, and ``enable_org`` to additionally maintain shared organization
+        memory governed by ``org_profile`` (a doc/path/text; defaults to the
+        shipped template). Both require the ``store`` extra.
+        """
         context = Context.create(
             system_prompt=system_prompt,
             data_dir=data_dir,
             persist=persist,
             persist_long_term=persist_long_term,
         )
+
+        memory = None
+        org_memory = None
+        profile_text = None
+        if enable_memory or enable_org:
+            if not _STORE_AVAILABLE:
+                raise RuntimeError(
+                    "Memory store needs the 'store' extra: pip install memorizer[store]"
+                )
+            resolved_dir = (
+                Path(data_dir).expanduser() if data_dir is not None
+                else Path.home() / ".memorizer"
+            )
+            embedder = PrivatemodeEmbedder(
+                base_url=base_url,
+                api_key=api_key,
+                model=embedding_model,
+                dimensions=embedding_dimensions,
+            )
+            memory, org_memory = build_stores(
+                embedder=embedder,
+                data_dir=resolved_dir,
+                location=qdrant_location,
+                agent=enable_memory,
+                org=enable_org,
+            )
+            if enable_org:
+                profile_text = load_org_profile(org_profile)
+
         return cls(
             context,
             model_id=model_id,
@@ -138,6 +211,9 @@ class Model:
             base_url=base_url,
             api_key=api_key,
             thinking=thinking,
+            memory=memory,
+            org_memory=org_memory,
+            org_profile=profile_text,
         )
 
     def stream(
@@ -250,6 +326,63 @@ class Model:
         data = self._nostream_int(messages, max_completion_tokens=self.max_completion_tokens)
         return (data["choices"][0]["message"].get("content") or "").strip()
 
+    # -- recall tool --------------------------------------------------------
+
+    def recall_tools(self) -> list[dict] | None:
+        """The tool list to expose to the model, or None if memory is disabled."""
+        if self.memory is None or RECALL_TOOL is None:
+            return None
+        return [RECALL_TOOL]
+
+    def execute_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
+        """Run tool calls and return the corresponding ``role: tool`` messages."""
+        results: list[dict] = []
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name")
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if name == "recall" and execute_recall is not None:
+                content = execute_recall(
+                    args,
+                    agent_store=self.memory,
+                    org_store=self.org_memory,
+                    default_limit=self.recall_limit,
+                )
+            else:
+                content = f"Unknown tool: {name}"
+            results.append(
+                {"role": "tool", "tool_call_id": tc.get("id", ""), "content": content}
+            )
+        return results
+
+    def generate(self, messages: list[dict] | None = None, *, max_rounds: int | None = None) -> str:
+        """Non-streaming completion that resolves ``recall`` tool calls in a loop.
+
+        Returns the final assistant text. Used by the library and tests; the chat
+        CLI streams instead (see ``memorizer.chat.completion``).
+        """
+        messages = list(self.context.to_messages() if messages is None else messages)
+        tools = self.recall_tools()
+        rounds = self.recall_max_rounds if max_rounds is None else max_rounds
+        for _ in range(max(1, rounds)):
+            data = self._nostream_int(
+                messages, tools=tools, max_completion_tokens=self.max_completion_tokens
+            )
+            msg = data["choices"][0]["message"]
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                return (msg.get("content") or "").strip()
+            messages.append(
+                {"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls}
+            )
+            messages.extend(self.execute_tool_calls(tool_calls))
+        # Out of rounds: force a final answer without tools.
+        data = self._nostream_int(messages, max_completion_tokens=self.max_completion_tokens)
+        return (data["choices"][0]["message"].get("content") or "").strip()
+
     def append(self, role: str, content: str) -> None:
         self.context.append(role, content)
         if self._compression_lock.acquire(blocking=False):
@@ -316,6 +449,8 @@ class Model:
         self._update_episodic_memory(long_term_messages, to_compress)
         self._update_factual_memory(to_compress)
         self._update_model_goal(to_compress)
+        if self.org_memory is not None and self.org_profile:
+            self._extract_org_knowledge(to_compress)
 
     def _update_episodic_memory(
         self,
@@ -340,7 +475,25 @@ class Model:
 
         start_time = to_compress[0].formatted_timestamp or "unknown"
         end_time = to_compress[-1].formatted_timestamp or "unknown"
-        summary = f"{start_time} — {end_time}\n\n{summary}"
+
+        # Store raw detail + summary in the retrieval store, then tag the
+        # in-context summary with the summary's short id so the model can pull the
+        # original detail back via recall(id=...).
+        prefix = f"{start_time} — {end_time}"
+        if self.memory is not None:
+            try:
+                raw_text = "\n\n".join(
+                    f"{m.formatted_timestamp or 'unknown'}\n{m.role}: {m.content}"
+                    for m in to_compress
+                )
+                raw_id = self.memory.add(raw_text, kind="raw", timestamp=end_time)
+                summary_id = self.memory.add(
+                    summary, kind="episode", timestamp=end_time, source_ids=[raw_id]
+                )
+                prefix = f"[{summary_id}] {prefix}"
+            except Exception as exc:
+                logger.warning("Episodic memory store write skipped: %s", exc)
+        summary = f"{prefix}\n\n{summary}"
 
         self.context.long_term_episodic.add_uncompressed(to_compress)
         remaining = [m for m in long_term_messages if m.role == "memory"]
@@ -469,3 +622,106 @@ class Model:
         messages = self.context.to_messages()
         messages.append({"role": "user", "content": system_instruction})
         return self.nostream(messages)
+
+    # -- organization memory ------------------------------------------------
+
+    def _extract_org_knowledge(self, messages: list[Message]) -> None:
+        """Extract generic, org-wide facts from a batch and add new ones to org memory.
+
+        Governed by ``self.org_profile`` (the org description + extraction rules).
+        The model is shown current org knowledge and asked for only NEW, generic,
+        non-overlapping items; a token-overlap guard drops near-duplicates as a
+        backstop so org memory stays small and has limited overlap with personal
+        memory.
+        """
+        if self.org_memory is None or not self.org_profile:
+            return
+
+        history = "\n".join(f"{m.role}: {m.content}" for m in messages)
+        existing = self.org_memory.all_units(kind="org_fact", limit=200)
+        existing_block = "\n".join(f"- {u.text}" for u in existing) or "(none yet)"
+
+        instruction = (
+            f"{self.org_profile}\n\n"
+            "Below is a recent conversation, followed by the organization knowledge "
+            "already stored. Following the extraction rules above, output ONLY new, "
+            "generic, organization-wide facts that are NOT already covered and are "
+            "NOT specific to one user or conversation. "
+            "Respond with a JSON array of short standalone strings (one fact each). "
+            "If nothing qualifies, respond with []."
+        )
+        prompt = (
+            f"{instruction}\n\n## Recent conversation\n{history}\n\n"
+            f"## Existing organization knowledge\n{existing_block}"
+        )
+
+        base_messages = self.context.to_messages()
+        base_messages.append({"role": "user", "content": prompt})
+        raw = self.nostream(base_messages)
+
+        existing_texts = [u.text for u in existing]
+        added = 0
+        for fact in _parse_json_string_list(raw):
+            fact = fact.strip()
+            if not fact or _is_near_duplicate(fact, existing_texts):
+                continue
+            try:
+                self.org_memory.add(fact, kind="org_fact")
+            except Exception as exc:
+                logger.warning("Org memory store write skipped: %s", exc)
+                continue
+            existing_texts.append(fact)
+            added += 1
+
+        if added:
+            self._refresh_org_block()
+
+    def _refresh_org_block(self) -> None:
+        """Rebuild the in-context org block from the shared org store."""
+        if self.org_memory is None:
+            return
+        try:
+            units = self.org_memory.all_units(kind="org_fact", limit=200)
+        except Exception as exc:
+            logger.warning("Org block refresh skipped: %s", exc)
+            return
+        block = "\n".join(f"- {u.text}  [{u.short_id}]" for u in units)
+        self.context.set_org_block(block)
+
+
+def _parse_json_string_list(raw: str) -> list[str]:
+    """Best-effort parse of a JSON array of strings from a model response."""
+    if not raw:
+        return []
+    text = raw.strip()
+    if text.startswith("```"):
+        # Strip ```json fences.
+        text = text.split("```")[1] if "```" in text[3:] else text.strip("`")
+        text = text[4:] if text.lower().startswith("json") else text
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in data if isinstance(item, (str, int, float)) and str(item).strip()]
+
+
+def _is_near_duplicate(fact: str, existing: list[str]) -> bool:
+    """True if ``fact`` overlaps an existing fact above the Jaccard threshold."""
+    tokens = _tokens(fact)
+    if not tokens:
+        return False
+    for other in existing:
+        other_tokens = _tokens(other)
+        if not other_tokens:
+            continue
+        overlap = len(tokens & other_tokens) / len(tokens | other_tokens)
+        if overlap >= ORG_DEDUPE_JACCARD:
+            return True
+    return False
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower()))

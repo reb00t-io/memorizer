@@ -104,6 +104,29 @@ def main() -> int:
         help="Enable model reasoning/thinking; off by default for lower latency "
         "(env: MEMORIZER_THINKING).",
     )
+    parser.add_argument(
+        "--memory",
+        action="store_true",
+        default=os.environ.get("MEMORIZER_MEMORY", "").lower() in ("1", "true", "yes"),
+        help="Enable Qdrant-backed recall memory + the `recall` tool "
+        "(needs the 'store' extra; env: MEMORIZER_MEMORY).",
+    )
+    parser.add_argument(
+        "--org",
+        action="store_true",
+        default=os.environ.get("MEMORIZER_ORG", "").lower() in ("1", "true", "yes"),
+        help="Also maintain shared organization memory (implies --memory).",
+    )
+    parser.add_argument(
+        "--org-profile",
+        default=os.environ.get("MEMORIZER_ORG_PROFILE"),
+        help="Path to the org profile / extraction-rules doc (env: MEMORIZER_ORG_PROFILE).",
+    )
+    parser.add_argument(
+        "--qdrant-url",
+        default=os.environ.get("MEMORIZER_QDRANT_URL"),
+        help="Qdrant server URL; omit for a local on-disk store (env: MEMORIZER_QDRANT_URL).",
+    )
     args = parser.parse_args()
 
     model = Model.create(
@@ -114,6 +137,10 @@ def main() -> int:
         system_prompt=config.SYSTEM_PROMPT,
         max_completion_tokens=args.max_completion_tokens,
         thinking=args.thinking,
+        enable_memory=args.memory or args.org,
+        enable_org=args.org,
+        org_profile=args.org_profile,
+        qdrant_location=args.qdrant_url,
     )
     asyncio.run(_chat_loop(
         model, max_completion_tokens=args.max_completion_tokens))

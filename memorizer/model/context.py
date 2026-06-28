@@ -22,6 +22,7 @@ class Context:
     """
 
     system: Memory
+    org: Memory
     model_goal: Memory
     workspace: Memory
     long_term_episodic: Memory
@@ -44,6 +45,7 @@ class Context:
             Path.home() / ".memorizer")
 
         system_path = base_dir / "system_memory.json"
+        org_path = base_dir / "org_block.json"
         model_goal_path = base_dir / "model_goal.json"
         workspace_path = base_dir / "workspace.json"
         long_term_path = base_dir / "ltm_episodic.json"
@@ -53,6 +55,7 @@ class Context:
         working_path = base_dir / "wm.json"
 
         persist_system_path: Optional[Path] = system_path if persist else None
+        persist_org_path: Optional[Path] = org_path if persist else None
         persist_model_goal_path: Optional[Path] = model_goal_path if persist else None
         persist_workspace_path: Optional[Path] = workspace_path if persist else None
         persist_short_term_path: Optional[Path] = short_term_path if persist else None
@@ -73,6 +76,10 @@ class Context:
         goal_roles = {"memory"}
         ctx = cls(
             system=system,
+            org=Memory(allowed_roles=goal_roles,
+                       max_messages=1,
+                       render_prefix="#Organization knowledge (shared, generic)",
+                       persist_path=persist_org_path),
             model_goal=Memory(allowed_roles=goal_roles,
                               max_messages=1,
                               render_prefix="#Assistant goals",
@@ -131,8 +138,22 @@ class Context:
             for name, memory in self._message_layers()
         }
 
+    def set_org_block(self, text: str) -> None:
+        """Set (or clear) the shared organization-knowledge block.
+
+        Rendered as the cacheable prefix (org first), so it must stay stable and
+        identical across agents — never put per-turn or volatile content here.
+        """
+        from .message import Message
+
+        if not text or not text.strip():
+            self.org.clear()
+            return
+        self.org.set_messages([Message(role="memory", content=text.strip())])
+
     def _message_layers(self) -> list[tuple[str, Memory]]:
         return [
+            ("org", self.org),
             ("system", self.system),
             ("long_term_episodic", self.long_term_episodic),
             ("model_goal", self.model_goal),
@@ -152,7 +173,10 @@ class Context:
     def to_string(self) -> str:
         parts: list[str] = []
 
-        parts.append("# System")
+        parts.append("# Organization")
+        parts.append(self.org.to_string())
+
+        parts.append("\n# System")
         parts.append(self.system.to_string())
 
         parts.append("\n# Model goal")
